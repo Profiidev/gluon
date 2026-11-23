@@ -550,3 +550,70 @@ async fn replays_do_not_use_up_the_quota() {
     .await;
   assert_eq!(status, 200, "{body}");
 }
+
+async fn call_revoke(s: &TestServer, bearer: &str) -> u16 {
+  s.client
+    .delete(format!("{}/api/v1/token", s.url))
+    .bearer_auth(bearer)
+    .json(&json!({ "token": "ghs_abc" }))
+    .send()
+    .await
+    .unwrap()
+    .status()
+    .as_u16()
+}
+
+#[tokio::test]
+async fn revoke_works_for_profiles_hardened_events_and_denied_repos() {
+  let s = TestServer::start_with(
+    "[[rules]]\nname = \"deny-nix\"\neffect = \"deny\"\nmatch = { repository_id = 42 }",
+  )
+  .await;
+  // Denied for issuing, but may still revoke.
+  assert_eq!(
+    s.post_token(&s.token("Profiidev/nix", 42, OWNER_ID), json!({}))
+      .await
+      .0,
+    403
+  );
+  assert_eq!(
+    call_revoke(&s, &s.token("Profiidev/nix", 42, OWNER_ID)).await,
+    204
+  );
+  // workflow_run is hardened for issuing, not for revoking.
+  let wr = s.token_with("Profiidev/foo", 1, OWNER_ID, |c| {
+    c["event_name"] = json!("workflow_run")
+  });
+  assert_eq!(call_revoke(&s, &wr).await, 204);
+}
+
+#[tokio::test]
+async fn revoke_has_its_own_quota() {
+  let s = TestServer::start_with("[limits]\nper_repository = \"2/min\"\nburst = 2").await;
+  for _ in 0..3 {
+    call_revoke(&s, &s.token("Profiidev/nix", 42, OWNER_ID)).await;
+  }
+  assert_eq!(
+    s.post_token(&s.token("Profiidev/nix", 42, OWNER_ID), json!({}))
+      .await
+      .0,
+    200
+  );
+}
+
+#[tokio::test]
+async fn rate_limited_token_can_be_retried() {
+  let s = TestServer::start_with("[limits]\nper_repository = \"1/s\"\nburst = 1").await;
+  assert_eq!(
+    s.post_token(&s.token("Profiidev/nix", 42, OWNER_ID), json!({}))
+      .await
+      .0,
+    200
+  );
+  let token = s.token("Profiidev/nix", 42, OWNER_ID);
+  assert_eq!(s.post_token(&token, json!({})).await.0, 429);
+  tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+  // Not burned by the 429.
+  assert_eq!(s.post_token(&token, json!({})).await.0, 200);
+  assert_eq!(s.post_token(&token, json!({})).await.0, 401);
+}

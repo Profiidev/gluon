@@ -306,12 +306,16 @@ async fn issue(
 
 /// Per-repository limit. Only checked for callers a rule accepts, so the
 /// limiter's key set stays bounded by the configured accounts.
-fn rate_limit(runtime: &crate::state::Runtime, caller: &Caller) -> Result<(), ApiError> {
+fn rate_limit(
+  runtime: &crate::state::Runtime,
+  caller: &Caller,
+  bucket: &str,
+) -> Result<(), ApiError> {
   let Some(limiter) = &runtime.limiter else {
     return Ok(());
   };
   let key = format!(
-    "{}|{}",
+    "{bucket}|{}|{}",
     caller.issuer,
     caller
       .repository_id
@@ -353,16 +357,21 @@ async fn issue_inner(
   }
 
   let rule = policy::select(&caller, req, &runtime.config.policy)?;
-  // Only callers some rule accepts reach the replay store, so arbitrary GitHub
-  // repositories cannot fill it.
+  // Order: replays are refused before they cost quota, a rate-limited token is
+  // not burned (it is only recorded after the limit), and only callers some
+  // rule accepts reach the limiter and the replay store at all.
+  if let Some((key, _)) = &replay_key
+    && state.replay.seen(key)
+  {
+    return Err(ApiError::invalid_token("replayed jti"));
+  }
+  rate_limit(&runtime, &caller, "issue")?;
   if let Some((key, expires_at)) = replay_key {
     state
       .replay
       .insert(key, expires_at)
       .map_err(ApiError::invalid_token)?;
   }
-  // After the replay check, so replayed tokens cannot use up a repository's quota.
-  rate_limit(&runtime, &caller)?;
   audit.rule = Some(rule.name.clone());
   audit.app = Some(rule.grant.app.clone());
   let app = runtime
@@ -653,10 +662,12 @@ async fn delete_token(
       .await
       .map_err(ApiError::invalid_token)?;
     audit.caller(&caller);
-    // Only callers some rule accepts may use the broker's GitHub client at all.
-    let rule = policy::select(&caller, &TokenRequest::default(), &runtime.config.policy)?;
+    // Only callers some rule or profile covers may use the broker's GitHub client.
+    let rule = policy::revoke_rule(&caller, &runtime.config.policy)
+      .ok_or_else(|| ApiError::denied("no rule or profile covers the caller"))?;
     audit.rule = Some(rule.name.clone());
-    rate_limit(&runtime, &caller)?;
+    // Own bucket: revoking never uses up the quota for issuing tokens.
+    rate_limit(&runtime, &caller, "revoke")?;
     let req: RevokeRequest =
       serde_json::from_slice(&body).map_err(|e| ApiError::invalid_request(e.to_string()))?;
     audit.token_sha256 = Some(token_hash(&req.token));

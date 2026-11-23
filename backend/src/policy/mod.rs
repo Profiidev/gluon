@@ -212,6 +212,18 @@ pub fn select<'a>(
     .ok_or_else(|| EvalError::Denied("no rule matched".into()))
 }
 
+/// Rule for revoking a token. Revoking only removes access, so any allow rule
+/// or profile matching the caller is enough; deny rules and event hardening do
+/// not apply (a denied repository must still be able to revoke).
+pub fn revoke_rule<'a>(caller: &Caller, policy: &'a Policy) -> Option<&'a Rule> {
+  policy
+    .rules
+    .iter()
+    .chain(policy.profiles.values())
+    .filter(|r| r.effect == Effect::Allow && r.matcher.matches(caller))
+    .min_by(|a, b| a.name.cmp(&b.name))
+}
+
 /// Network-derived inputs for [`finalize`].
 #[derive(Debug, Default)]
 pub struct Resolved {

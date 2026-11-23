@@ -808,6 +808,10 @@ pub fn parse_rate(s: &str) -> Result<(u32, Duration), String> {
     "h" | "hour" => Duration::from_secs(3600),
     p => return Err(format!("invalid rate unit {p:?}")),
   };
+  // The limiter refills one request every per / n; it must not round to zero.
+  if (per / n).is_zero() {
+    return Err(format!("rate {s:?} is too high"));
+  }
   Ok((n, per))
 }
 
@@ -835,6 +839,8 @@ mod test {
     assert_eq!(parse_rate("30/min").unwrap(), (30, Duration::from_secs(60)));
     assert!(parse_rate("0/min").is_err());
     assert!(parse_rate("30").is_err());
+    assert!(parse_rate("2000000000/s").is_err());
+    assert!(parse_rate("1000000/s").is_ok());
   }
 
   const BASE: &str = r#"

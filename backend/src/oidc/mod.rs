@@ -45,6 +45,17 @@ impl ReplayCache {
     }
   }
 
+  /// Whether `key` was already used and has not expired.
+  pub fn seen(&self, key: &str) -> bool {
+    let now = jsonwebtoken::get_current_timestamp();
+    self
+      .seen
+      .lock()
+      .unwrap()
+      .get(key)
+      .is_some_and(|e| *e >= now)
+  }
+
   /// Record `key` until `expires_at` (unix seconds); errors on replay or when full.
   pub fn insert(&self, key: String, expires_at: u64) -> Result<(), String> {
     let now = jsonwebtoken::get_current_timestamp();
