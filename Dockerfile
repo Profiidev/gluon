@@ -5,7 +5,7 @@ ARG RUST_ARCH=${RUST_ARCH/arm64/aarch64}
 ARG TARGET=${RUST_ARCH}-unknown-linux-gnu
 ARG RUSTFLAGS="-C target-feature=+crt-static"
 
-FROM ghcr.io/profiidev/images/rust-gnu-builder:main@sha256:582a04eaf419593bc0a2aeb020384d0af0e8de202b0437259eb78a2e43f57257 AS backend-planner
+FROM ghcr.io/profiidev/images/rust-gnu-builder:main@sha256:5e71dc6dc6f1263f670e506e5a1231d6069acce53c9859b98d9dc3fe2e8d4f2c AS backend-planner
 
 ARG TARGET
 ARG RUSTFLAGS
@@ -18,7 +18,7 @@ RUN \
   --mount=type=cache,target=/app/target \
   cargo chef prepare --recipe-path recipe.json --bin backend
 
-FROM ghcr.io/profiidev/images/rust-gnu-builder:main@sha256:582a04eaf419593bc0a2aeb020384d0af0e8de202b0437259eb78a2e43f57257 AS backend-builder
+FROM ghcr.io/profiidev/images/rust-gnu-builder:main@sha256:5e71dc6dc6f1263f670e506e5a1231d6069acce53c9859b98d9dc3fe2e8d4f2c AS backend-builder
 
 ARG TARGET
 ARG RUSTFLAGS
