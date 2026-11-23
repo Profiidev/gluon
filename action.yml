@@ -1,0 +1,39 @@
+name: Gluon token
+description: Exchange the job's OIDC token for a short-lived, scoped GitHub App installation token from a gluon broker
+
+inputs:
+  url:
+    description: Base URL of the gluon broker, e.g. https://gluon.profidev.io
+    required: true
+  audience:
+    description: OIDC audience the broker expects
+    required: false
+    default: github-token-broker
+  repositories:
+    description: Comma or newline separated target repositories (owner/name or numeric IDs). Defaults to the broker's grant (usually this repository)
+    required: false
+  permissions:
+    description: 'Requested permissions as name:level pairs separated by commas or newlines (e.g. "contents:write, pull_requests:read"), or a JSON object. Defaults to everything the grant allows'
+    required: false
+  profile:
+    description: Named broker profile to use
+    required: false
+  skip-revoke:
+    description: Do not revoke the token in the post step
+    required: false
+    default: 'false'
+  github-api-url:
+    description: GitHub API base URL used for revocation
+    required: false
+    default: ${{ github.api_url }}
+
+outputs:
+  token:
+    description: The GitHub installation token
+  expires_at:
+    description: Token expiry (RFC 3339)
+
+runs:
+  using: node24
+  main: action/dist/index.cjs
+  post: action/dist/index.cjs
