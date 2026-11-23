@@ -27,7 +27,7 @@ jobs:
         with:
           cache-on-failure: true
           shared-key: "linter_cache"
-      - uses: bahmutov/npm-install@v1
+      - uses: bahmutov/npm-install@20216767ca67f0f7b4d095dc5859c5700a6581cb # v1.12.1
 
       - name: Run linters
         uses: profiidev/rust-lint-action@16801b02ca2bc0441e458d7f713d8a0e8d417927 # v4
