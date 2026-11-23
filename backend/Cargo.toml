@@ -1,0 +1,44 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+centaurus = { version = "0.17.9", features = ["backend", "logging"], default-features = false }
+axum = { version = "0.8.9", features = ["macros", "tracing"] }
+tokio = { version = "1.54.1", features = ["signal", "rt-multi-thread", "macros", "fs"] }
+tracing = "0.1.44"
+dotenvy = "0.15.7"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.154"
+figment = { version = "0.10.19", features = ["env"] }
+toml = "1.2.2"
+jsonwebtoken = { version = "12.0.0", features = ["rust_crypto"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+arc-swap = "1.9.5"
+moka = { version = "0.12.16", features = ["sync"] }
+governor = "0.10.4"
+globset = "0.4.22"
+regex = "1.13.2"
+cel = "0.16.0"
+zeroize = "1.9.2"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+sha2 = "0.11.0"
+hex = "0.4.3"
+chrono = { version = "0.4.44", features = ["serde"] }
+ipnet = { version = "2.11.0", features = ["serde"] }
+serde_urlencoded = "0.7.1"
+
+[lib]
+name = "backend"
+path = "src/lib.rs"
+
+[[bin]]
+name = "backend"
+path = "src/main.rs"
+
+[dev-dependencies]
+wiremock = "=0.6.5"
+tempfile = "=3.27.0"
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "form"] }

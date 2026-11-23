@@ -1,0 +1,67 @@
+# Example configuration; see README.md for every option.
+
+[server]
+listen = "127.0.0.1:8000"
+metrics_listen = "127.0.0.1:9090"
+trusted_proxies = ["127.0.0.1/32"]
+reload_interval = "10s"
+
+[[issuers]]
+name = "github"
+url = "https://token.actions.githubusercontent.com"
+audience = "github-token-broker"
+max_token_age = "5m"
+replay_protection = true
+
+[[apps]]
+name = "main"
+client_id = "Iv23liM4eWCXa0R0IMG9"
+keys = [{ source = "file", path = "/run/secrets/gluon/main-key.pem" }]
+# api_base = "https://api.github.com"
+
+[[apps.installations]]
+owner_id = 92174452
+installation_id = 987654
+
+[defaults]
+self_scope = true
+app = "main"
+owner_ids = [92174452]
+permissions = { contents = "write", metadata = "read", pull_requests = "write" }
+
+# Per-repo override: packages:write, but only from main.
+[[overrides]]
+repository_id = 111111
+mode = "merge"
+permissions = { packages = "write" }
+match = { ref = { glob = "refs/heads/main" } }
+
+# Cross-repo grant.
+[[overrides]]
+repository_id = 222222
+mode = "merge"
+extra_targets = [{ repository = "Profiidev/nix" }]
+permissions = { contents = "write" }
+match = { job_workflow_ref = { glob = "Profiidev/infra/.github/workflows/deploy.yml@refs/heads/main" } }
+
+# Named profile, selected with profile=release.
+[[profiles]]
+name = "release"
+app = "main"
+target = "self"
+permissions = { contents = "write", packages = "write" }
+match = { ref_type = { eq = "tag" } }
+
+# Explicit deny.
+[[rules]]
+name = "no-self-hosted-write"
+effect = "deny"
+priority = 100
+match = { runner_environment = { eq = "self-hosted" }, repository_id = { in = [333333] } }
+
+[limits]
+per_repository = "30/min"
+burst = 10
+
+[repo_policies]
+enabled = false
