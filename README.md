@@ -47,7 +47,7 @@ Without the action:
 OIDC=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
   "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=github-token-broker" | jq -r .value)
 GH_TOKEN=$(curl -sf -X POST -H "Authorization: Bearer $OIDC" \
-  https://gluon.profidev.io/v1/token | jq -r .token)
+  https://gluon.profidev.io/api/v1/token | jq -r .token)
 echo "::add-mask::$GH_TOKEN"
 ```
 
@@ -83,23 +83,23 @@ Keep the secrets in gluon, helm-charts and server-config. The broker's own relea
 
 ## API
 
-Every endpoint except `/healthz`, `/readyz` and `/metrics` needs `Authorization: Bearer <OIDC token>`.
+All routes live under `/api`. Every endpoint except `/api/health`, `/api/readyz` and metrics needs `Authorization: Bearer <OIDC token>`. A request may name at most 20 targets.
 
-| Endpoint            | Purpose                                                                                                                                                                                                                             |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /v1/token`    | Body (all optional): `{"repositories": ["o/n"], "repository_ids": [1], "permissions": {"contents": "write"}, "profile": "release"}`. Returns `token`, `expires_at`, `permissions`, `repository_ids`, `repositories`, `rule`, `app`. |
-| `GET /v1/token`     | Same, with query parameters `profile`, `repositories=o/n,o/m`, `repository_ids=1,2`, `permissions=contents:write,issues:read`.                                                                                                      |
-| `DELETE /v1/token`  | Body `{"token": "ghs_…"}`. Revokes the token through `DELETE /installation/token`.                                                                                                                                                  |
-| `POST /v1/exchange` | RFC 8693, form or JSON. `subject_token` is in the body. `resource` is `owner/name`, an ID, or an owner (the owner form means "the grant's target"). `scope` is a profile.                                                           |
-| `GET /healthz`      | Liveness.                                                                                                                                                                                                                           |
-| `GET /readyz`       | The config is loaded, the keys are readable and every issuer's JWKS was fetched at least once.                                                                                                                                      |
-| `GET /metrics`      | Prometheus metrics. Served on `server.metrics_listen` when that is set, otherwise on the main listener.                                                                                                                             |
+| Endpoint                | Purpose                                                                                                                                                                                                                             |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/v1/token`    | Body (all optional): `{"repositories": ["o/n"], "repository_ids": [1], "permissions": {"contents": "write"}, "profile": "release"}`. Returns `token`, `expires_at`, `permissions`, `repository_ids`, `repositories`, `rule`, `app`. |
+| `GET /api/v1/token`     | Same, with query parameters `profile`, `repositories=o/n,o/m`, `repository_ids=1,2`, `permissions=contents:write,issues:read`.                                                                                                      |
+| `DELETE /api/v1/token`  | Body `{"token": "ghs_…"}`. Revokes the token through `DELETE /installation/token`.                                                                                                                                                  |
+| `POST /api/v1/exchange` | RFC 8693, form or JSON. `subject_token` is in the body. `resource` is `owner/name`, an ID, or an owner (the owner form means "the grant's target"). `scope` is a profile.                                                           |
+| `GET /api/health`       | Liveness.                                                                                                                                                                                                                           |
+| `GET /api/readyz`       | The config is loaded, the keys are readable and every issuer's JWKS was fetched at least once.                                                                                                                                      |
+| metrics                 | Prometheus metrics on `METRICS_PORT` (path `/`) when set, otherwise `/api/metrics`.                                                                                                                                                 |
 
 Error bodies are `{"error": "<code>", "error_description": "<generic text>"}`. They never reveal policy details. Codes: `invalid_request` (400), `invalid_token` (401), `access_denied` (403), `not_installed` (422), `rate_limited` (429), `upstream_error` (502).
 
 ## Configuration
 
-`CONFIG_PATH` (default `/etc/gluon/config.toml`) or `--config <path>` points at a TOML file. `LOG_LEVEL` sets the log level (default `info`).
+`CONFIG_PATH` (default `/etc/gluon/config.toml`) or `--config <path>` points at a TOML file. Process settings come from the environment like the other centaurus apps: `PORT` (default `8000`), `LOG_LEVEL` (default `info`), `ALLOWED_ORIGINS`, `METRICS_ENABLED` (default `true`), `METRICS_PORT`, `METRICS_NAME` (default `gluon`).
 
 `gluon --check [--config path]` validates the file and exits.
 
@@ -108,13 +108,13 @@ The config and key files are reloaded atomically:
 - on `SIGHUP`,
 - when their mtime changes, checked every `server.reload_interval` (default `10s`, `0s` disables this).
 
-An invalid config or an unreadable key keeps the old configuration active. A change to a listen address needs a restart.
+An invalid config or an unreadable key keeps the old configuration active.
 
 See [`backend/config.example.toml`](backend/config.example.toml) for a full example.
 
 ### `[server]`
 
-`listen` (default `0.0.0.0:8000`), `metrics_listen`, `trusted_proxies` (CIDRs whose `X-Forwarded-For` is trusted for the audit log client IP), `reload_interval`.
+`trusted_proxies` (CIDRs whose `X-Forwarded-For` is trusted for the audit log client IP), `reload_interval`.
 
 ### `[[issuers]]`
 
@@ -160,7 +160,7 @@ Signing uses the first key that works. If GitHub answers 401, the next key is tr
 | `[[profiles]]`  | A named grant, selected with `profile=<name>`. Its `match` must still hold.                                                                                                                                                                                                                                                                                                                                                                             |
 | `[[rules]]`     | General `allow`/`deny` rules with a `priority`. Any matching deny wins, profiles included.                                                                                                                                                                                                                                                                                                                                                              |
 
-Rules and profiles take `target = "self" \| "owner" \| "repositories"`, `repositories = [id \| "o/n"]`, `permissions`, `app` and `match`. Allow rules without an `owner_id` or `repository_id` condition are automatically bound to `defaults.owner_ids`. Without owner IDs they are rejected.
+Rules and profiles take `target = "self" \| "owner" \| "repositories"`, `repositories = [id \| "o/n"]`, `permissions`, `app` and `match`. Allow rules for a GitHub issuer without a positive `owner_id`/`repository_id` condition (`eq`/`in`; negated or pattern conditions don't count) are automatically bound to `defaults.owner_ids`. Rules for other issuers must state such a condition themselves. Overrides of both modes are bound to `defaults.owner_ids` as well.
 
 `match` is a table of conditions, and all of them must hold:
 
@@ -169,23 +169,23 @@ Rules and profiles take `target = "self" \| "owner" \| "repositories"`, `reposit
 - `field = { eq, in, glob, regex, not_eq, not_in, not_glob, not_regex }`
 - `expr = "<CEL over caller>"`
 
-Regexes are anchored. In globs, `*` does not cross `/`; use `**` for that.
+Regexes are anchored. In globs, `*` does not cross `/`; use `**` for that. `owner` and `repository` compare case-insensitively; everything else, refs included, is case-sensitive. A missing field fails positive conditions and satisfies negated ones. A CEL error makes an allow rule not match and a deny rule match.
 
 Per-rule flags:
 
-| Flag                     | Effect                                                                                                                                                                         |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `allow_caller_target`    | The caller may request a subset of the target. Asking for exactly the target always works.                                                                                     |
-| `allow_owner_wide`       | Required for `target = "owner"`.                                                                                                                                               |
-| `allow_events = [..]`    | `pull_request_target` and `workflow_run` are denied unless listed here.                                                                                                        |
-| `allow_non_branch_write` | On refs that are not a branch or tag (for example `refs/pull/*`), unrequested write permissions become read, and an explicit write request gets 403. This flag turns that off. |
-| `allow_dangerous`        | Required for `administration`, `workflows`, `secrets`, `members` and `organization_administration`.                                                                            |
+| Flag                     | Effect                                                                                                                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow_caller_target`    | The caller may request a subset of the target. Asking for exactly the target always works.                                                                                               |
+| `allow_owner_wide`       | Required for `target = "owner"`.                                                                                                                                                         |
+| `allow_events = [..]`    | `pull_request_target` and `workflow_run` are denied unless listed here.                                                                                                                  |
+| `allow_non_branch_write` | On refs that are not a branch or tag (for example `refs/pull/*`), unrequested write permissions become read, and an explicit write request gets 403. This flag turns that off.           |
+| `allow_dangerous`        | Required for `administration`, `workflows`, `secrets`, `members`, `environments`, hooks, runner, secret and other organization-admin permissions (full list in `DANGEROUS_PERMISSIONS`). |
 
 A token never exceeds `requested ∩ rule ∩ installation`. An explicitly requested permission above the rule gets 403. One above what the installation has gets 422. All targets must be in one installation, otherwise 400.
 
 ### `[limits]`
 
-`per_repository = "30/min"` (also `/s`, `/h`) and `burst`. The limit is kept per issuer and repository, in memory.
+`per_repository = "30/min"` (also `/s`, `/h`) and `burst`. The limit is kept per issuer and repository, in memory. In front of it, centaurus applies a per-IP limit (10/s, burst 20).
 
 ## Operations
 
@@ -199,7 +199,7 @@ A token never exceeds `requested ∩ rule ∩ installation`. An explicitly reque
   - `broker_config_reload_total{result}`
   - `broker_replay_rejected_total`
 - Replay protection and rate limits are per process. Run a single replica.
-- Expose only `/v1/*` publicly. The chart's ingress does that.
+- Expose only `/api/v1/*` publicly. The chart's ingress does that and requires TLS.
 
 ## Deployment
 
