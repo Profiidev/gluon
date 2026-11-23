@@ -118,9 +118,9 @@ See [`backend/config.example.toml`](backend/config.example.toml) for a full exam
 
 ### `[[issuers]]`
 
-`name`, `url`, `audience`, plus optional:
+`name`, `url` (https; plain http only for loopback), `audience`, plus optional:
 
-- `jwks_url` (default: OIDC discovery)
+- `jwks_url` (default: OIDC discovery, which must point at the issuer's own origin; https)
 - `kind`: `github` / `forgejo` / `generic`
 - `max_token_age` (default `5m`, at most `1h`)
 - `clock_skew` (default `60s`)
@@ -160,7 +160,7 @@ Signing uses the first key that works. If GitHub answers 401, the next key is tr
 | `[[profiles]]`  | A named grant, selected with `profile=<name>`. Its `match` must still hold.                                                                                                                                                                                                                                                                                                                                                                             |
 | `[[rules]]`     | General `allow`/`deny` rules with a `priority`. Any matching deny wins, profiles included.                                                                                                                                                                                                                                                                                                                                                              |
 
-Rules and profiles take `target = "self" \| "owner" \| "repositories"`, `repositories = [id \| "o/n"]`, `permissions`, `app` and `match`. Allow rules for a GitHub issuer without a positive `owner_id`/`repository_id` condition (`eq`/`in`; negated or pattern conditions don't count) are automatically bound to `defaults.owner_ids`. Rules for other issuers must state such a condition themselves. Overrides of both modes are bound to `defaults.owner_ids` as well.
+Rules and profiles take `target = "self" \| "owner" \| "repositories"`, `repositories = [id \| "o/n"]`, `permissions`, `app` and `match`. Allow rules for a GitHub issuer without a positive `owner_id`/`repository_id` condition (`eq`/`in`; negated or pattern conditions don't count) are automatically bound to `defaults.owner_ids`. Rules for other issuers must state such a condition themselves. Overrides of both modes are bound to `defaults.owner_ids` as well; an `owner_id` condition in an override must use `eq`/`in`.
 
 `match` is a table of conditions, and all of them must hold:
 

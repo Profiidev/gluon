@@ -102,7 +102,11 @@ fn sign(claims: &Value) -> String {
 }
 
 async fn check(env: &Env, token: &str) -> Result<Caller, String> {
-  validate(std::slice::from_ref(&env.issuer), &env.replay, token).await
+  let (caller, replay_key) = validate(std::slice::from_ref(&env.issuer), token).await?;
+  if let Some((key, expires_at)) = replay_key {
+    env.replay.insert(key, expires_at)?;
+  }
+  Ok(caller)
 }
 
 #[tokio::test]

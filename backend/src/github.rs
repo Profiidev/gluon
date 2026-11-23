@@ -124,7 +124,11 @@ impl GitHubApp {
     http: reqwest::Client,
     previous: Option<&GitHubApp>,
   ) -> GitHubApp {
-    if let Some(p) = previous.filter(|p| p.config == config) {
+    // Same App on the same API: keep backoff and caches even if keys or
+    // installation pins changed (static pins are checked before the cache).
+    if let Some(p) = previous
+      .filter(|p| p.config.client_id == config.client_id && p.config.api_base == config.api_base)
+    {
       return GitHubApp {
         config,
         keys,
@@ -312,6 +316,13 @@ impl GitHubApp {
       body["message"].as_str().unwrap_or("")
     );
     Err(match status {
+      // Redirects are not followed; a 301 means the repository was renamed or moved.
+      s if s.is_redirection() => {
+        warn!(
+          "{endpoint}: {status}, repository renamed or moved; update the config if a rule names it"
+        );
+        GhError::NotInstalled(msg)
+      }
       StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY => GhError::NotInstalled(msg),
       StatusCode::TOO_MANY_REQUESTS => GhError::RateLimited,
       StatusCode::FORBIDDEN if msg.contains("rate limit") => GhError::RateLimited,
@@ -388,7 +399,7 @@ impl GitHubApp {
   }
 
   /// Resolve `owner/name` to its ID, owner and installation.
-  pub async fn resolve_repo(&self, full_name: &str) -> GhResult<RepoInfo> {
+  pub async fn resolve_repo(self: &Arc<Self>, full_name: &str) -> GhResult<RepoInfo> {
     let key = full_name.to_ascii_lowercase();
     if let Some(cached) = self.repos.get(&key) {
       return cached.map_err(GhError::NotInstalled);
@@ -403,7 +414,7 @@ impl GitHubApp {
     result
   }
 
-  async fn lookup_repo(&self, full_name: &str) -> GhResult<RepoInfo> {
+  async fn lookup_repo(self: &Arc<Self>, full_name: &str) -> GhResult<RepoInfo> {
     if !valid_full_name(full_name) {
       return Err(GhError::NotInstalled("invalid repository name".into()));
     }
@@ -425,14 +436,12 @@ impl GitHubApp {
       .as_u64()
       .ok_or_else(|| GhError::Upstream("installation without account".into()))?;
     // The ID needs an installation token; a metadata-only token for just this repo.
-    let minted = self
-      .mint_raw(
-        installation_id,
-        json!({ "repositories": [name], "permissions": { "metadata": "read" } }),
-      )
+    let body = json!({ "repositories": [name], "permissions": { "metadata": "read" } });
+    let id = self
+      .with_internal_token(installation_id, body, |_, minted| async move {
+        Ok(minted.repositories.first().map(|r| r.id))
+      })
       .await?;
-    let id = minted.repositories.first().map(|r| r.id);
-    self.revoke(&minted.token).await.ok();
     let info = RepoInfo {
       id: id.ok_or_else(|| GhError::NotInstalled(format!("{full_name} not in installation")))?,
       owner_id,
@@ -442,43 +451,63 @@ impl GitHubApp {
   }
 
   /// All repository IDs of an installation (owner-wide targets).
-  pub async fn installation_repos(&self, installation_id: u64) -> GhResult<Vec<u64>> {
+  pub async fn installation_repos(self: &Arc<Self>, installation_id: u64) -> GhResult<Vec<u64>> {
     // shortcut: listing needs an installation token without repository_ids; it is
-    // metadata-only, never returned to a caller and revoked right away.
-    let minted = self
-      .mint_raw(
-        installation_id,
-        json!({ "permissions": { "metadata": "read" } }),
-      )
-      .await?;
-    let mut ids = Vec::new();
-    let mut page = 1;
-    let result = loop {
-      let res = self
-        .call(
-          Method::GET,
-          &format!("/installation/repositories?per_page=100&page={page}"),
-          "GET /installation/repositories",
-          Auth::Token(&minted.token),
-          None,
-        )
-        .await;
-      let (status, body) = match res {
-        Ok(r) => r,
-        Err(e) => break Err(e),
-      };
-      if let Err(e) = Self::expect_ok("installation repos", status, &body) {
-        break Err(e);
+    // metadata-only, never returned to a caller and always revoked.
+    let body = json!({ "permissions": { "metadata": "read" } });
+    self
+      .with_internal_token(installation_id, body, |app, minted| async move {
+        let mut ids = Vec::new();
+        for page in 1.. {
+          let (status, body) = app
+            .call(
+              Method::GET,
+              &format!("/installation/repositories?per_page=100&page={page}"),
+              "GET /installation/repositories",
+              Auth::Token(&minted.token),
+              None,
+            )
+            .await?;
+          Self::expect_ok("installation repos", status, &body)?;
+          let repos = body["repositories"].as_array().cloned().unwrap_or_default();
+          ids.extend(repos.iter().filter_map(|r| r["id"].as_u64()));
+          if repos.len() < 100 {
+            break;
+          }
+        }
+        Ok(ids)
+      })
+      .await
+  }
+
+  /// Mint an internal token, hand it to `f`, and always revoke it. Runs as its
+  /// own task, so a cancelled request cannot skip the revocation.
+  async fn with_internal_token<T, F, Fut>(
+    self: &Arc<Self>,
+    installation_id: u64,
+    body: Value,
+    f: F,
+  ) -> GhResult<T>
+  where
+    T: Send + 'static,
+    F: FnOnce(Arc<Self>, Minted) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = GhResult<T>> + Send,
+  {
+    let app = self.clone();
+    tokio::spawn(async move {
+      let minted = app.mint_raw(installation_id, body).await?;
+      let token = minted.token.clone();
+      let result = f(app.clone(), minted).await;
+      if let Err(e) = app.revoke(&token).await {
+        warn!(
+          "app {}: revoking internal token failed: {e:?}",
+          app.config.name
+        );
       }
-      let repos = body["repositories"].as_array().cloned().unwrap_or_default();
-      ids.extend(repos.iter().filter_map(|r| r["id"].as_u64()));
-      if repos.len() < 100 {
-        break Ok(ids);
-      }
-      page += 1;
-    };
-    self.revoke(&minted.token).await.ok();
-    result
+      result
+    })
+    .await
+    .map_err(|e| GhError::Upstream(format!("internal token task: {e}")))?
   }
 
   async fn mint_raw(&self, installation_id: u64, body: Value) -> GhResult<Minted> {
@@ -530,5 +559,26 @@ impl GitHubApp {
       return Ok(());
     }
     Self::expect_ok("revoke", status, &body)
+  }
+}
+
+#[cfg(test)]
+mod test {
+  use super::*;
+
+  #[test]
+  fn redirects_mean_not_installed() {
+    let err = GitHubApp::expect_ok("x", StatusCode::MOVED_PERMANENTLY, &Value::Null).unwrap_err();
+    assert!(matches!(err, GhError::NotInstalled(_)));
+  }
+
+  #[test]
+  fn names() {
+    for ok in ["Profiidev", "a.b_c-d", "x"] {
+      assert!(valid_name(ok), "{ok}");
+    }
+    for bad in ["", ".", "..", "a/b", "a?b", "a b", &"x".repeat(101)] {
+      assert!(!valid_name(bad), "{bad}");
+    }
   }
 }

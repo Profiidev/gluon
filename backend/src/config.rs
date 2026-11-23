@@ -465,6 +465,10 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
         return Err(format!("{name}: match.{key} is implied by the override"));
       }
     }
+    // A negated or pattern owner_id would replace the owner binding below.
+    if o.match_.contains_key("owner_id") && !binds(&o.match_, "owner_id") {
+      return Err(format!("{name}: match.owner_id must use eq/in"));
+    }
     let mut m = o.match_.clone();
     m.insert("issuer".into(), toml::Value::String(issuer.clone()));
     m.insert(
@@ -660,6 +664,13 @@ fn compile_issuer(i: RawIssuer) -> Result<IssuerConfig, String> {
   } else {
     IssuerKind::Generic
   });
+  // Plain http lets anyone on the path swap the signing keys; only loopback
+  // (tests, local development) is exempt.
+  for url in std::iter::once(&i.url).chain(i.jwks_url.as_ref()) {
+    if !secure_url(url) {
+      return Err(ctx(format!("{url} must use https")));
+    }
+  }
   if i.audience.is_empty() {
     return Err(ctx("audience is empty".into()));
   }
@@ -724,6 +735,16 @@ fn compile_issuer(i: RawIssuer) -> Result<IssuerConfig, String> {
     claims: i.claims,
     required_claims,
   })
+}
+
+fn secure_url(url: &str) -> bool {
+  match reqwest::Url::parse(url) {
+    Ok(u) if u.scheme() == "https" => true,
+    Ok(u) if u.scheme() == "http" => {
+      matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+    }
+    _ => false,
+  }
 }
 
 /// A positive `eq`/`in` condition on `key`; negated or pattern conditions do not bind.
@@ -882,6 +903,18 @@ permissions = { contents = "read" }
       ("bad rate", "[limits]\nper_repository='lots'"),
       ("profile deny", "[[profiles]]\nname='p'\neffect='deny'"),
       ("empty grant", "[[profiles]]\nname='p'"),
+      (
+        "override negated owner",
+        "[[overrides]]\nrepository_id=1\nmode='replace'\npermissions={contents='read'}\nmatch={owner_id={not_eq=2}}",
+      ),
+      (
+        "http issuer",
+        "[[issuers]]\nname='github'\nurl='http://token.example.com'\naudience='a'",
+      ),
+      (
+        "http jwks",
+        "[[issuers]]\nname='github'\nurl='https://token.example.com'\njwks_url='http://token.example.com/jwks'\naudience='a'",
+      ),
       (
         "override implied key",
         "[[overrides]]\nrepository_id=1\nmatch={repository_id={eq=2}}",

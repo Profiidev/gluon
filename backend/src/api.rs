@@ -215,19 +215,24 @@ impl Audit {
 }
 
 fn client_ip(state: &AppState, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-  let runtime = state.runtime.load();
-  let trusted = |ip: &IpAddr| {
-    runtime
-      .config
-      .server
-      .trusted_proxies
-      .iter()
-      .any(|n| n.contains(ip))
-  };
-  let mut ip = peer.ip();
-  if trusted(&ip)
-    && let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-  {
+  forwarded_ip(
+    &state.runtime.load().config.server.trusted_proxies,
+    peer.ip(),
+    headers,
+  )
+}
+
+fn forwarded_ip(proxies: &[ipnet::IpNet], peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+  let trusted = |ip: &IpAddr| proxies.iter().any(|n| n.contains(ip));
+  let mut ip = peer;
+  // Proxies may append a separate header line instead of extending the first one.
+  let xff = headers
+    .get_all("x-forwarded-for")
+    .iter()
+    .filter_map(|v| v.to_str().ok())
+    .collect::<Vec<_>>()
+    .join(",");
+  if trusted(&ip) && !xff.is_empty() {
     // Walk from the closest hop back until the first untrusted address.
     // An unparsable hop ends the walk: everything before it is client-supplied.
     for hop in xff.rsplit(',').map(|h| h.trim().parse::<IpAddr>()) {
@@ -307,7 +312,7 @@ async fn issue_inner(
 ) -> Result<TokenResponse, ApiError> {
   let runtime = state.runtime.load_full();
   let subject = subject.ok_or_else(|| ApiError::invalid_token("missing bearer token"))?;
-  let caller = oidc::validate(&runtime.issuers, &state.replay, subject)
+  let (caller, replay_key) = oidc::validate(&runtime.issuers, subject)
     .await
     .map_err(ApiError::invalid_token)?;
   audit.caller(&caller);
@@ -342,6 +347,14 @@ async fn issue_inner(
   }
 
   let rule = policy::select(&caller, req, &runtime.config.policy)?;
+  // Only callers some rule accepts reach the replay store, so arbitrary GitHub
+  // repositories cannot fill it.
+  if let Some((key, expires_at)) = replay_key {
+    state
+      .replay
+      .insert(key, expires_at)
+      .map_err(ApiError::invalid_token)?;
+  }
   audit.rule = Some(rule.name.clone());
   audit.app = Some(rule.grant.app.clone());
   let app = runtime
@@ -382,7 +395,7 @@ async fn issue_inner(
 
 /// Turn rule and requested targets into IDs and find the single installation they all belong to.
 async fn resolve_targets(
-  app: &GitHubApp,
+  app: &Arc<GitHubApp>,
   caller: &Caller,
   rule: &policy::Rule,
   req: &TokenRequest,
@@ -438,6 +451,9 @@ async fn resolve_targets(
   // Requested names: only look up names that can be in the grant at all, and
   // answer access_denied for unknown ones so callers learn nothing about them.
   let caller_repo = caller.repository.as_deref().map(str::to_ascii_lowercase);
+  let caller_owner_name = caller.owner.as_deref().map(str::to_ascii_lowercase);
+  // Installation(s) the grant itself lives in; requested names must match it.
+  let mut grant_installs = installations.clone();
   let needs_lookup = rule.grant.target.owner_wide
     || rule
       .grant
@@ -458,10 +474,26 @@ async fn resolve_targets(
     if !needs_lookup {
       return Err(ApiError::denied("requested repository outside the grant"));
     }
+    // An owner-wide grant only covers the caller's own account.
+    if rule.grant.target.owner_wide && lower.split('/').next() != caller_owner_name.as_deref() {
+      return Err(ApiError::denied("requested repository outside the owner"));
+    }
+    if grant_installs.is_empty() {
+      // ID-only grant: it lives in the caller's installation.
+      let (_, owner_id, login) = caller_github()
+        .map_err(|_| ApiError::invalid_request("cannot locate installation for ID-only targets"))?;
+      grant_installs.insert(app.installation_for_owner(owner_id, &login).await?);
+    }
     let info = app.resolve_repo(name).await.map_err(|e| match e {
       GhError::NotInstalled(d) => ApiError::denied(format!("requested repository: {d}")),
       e => e.into(),
     })?;
+    // Same answer as for unknown names: nothing about other installations leaks.
+    if !grant_installs.contains(&info.installation_id) {
+      return Err(ApiError::denied(
+        "requested repository in another installation",
+      ));
+    }
     installations.insert(info.installation_id);
     names.insert(lower, info.id);
   }
@@ -492,7 +524,12 @@ async fn resolve_targets(
     ));
   }
   // Only IDs known: they must live next to the caller (mint fails otherwise).
-  let installation = match installations.into_iter().next().or(caller_owner) {
+  let installation = match installations
+    .into_iter()
+    .next()
+    .or(caller_owner)
+    .or(grant_installs.into_iter().next())
+  {
     Some(i) => i,
     None => {
       let (_, owner_id, login) = caller_github()
@@ -602,7 +639,9 @@ async fn delete_token(
     let runtime = state.runtime.load_full();
     let subject =
       bearer(&headers).ok_or_else(|| ApiError::invalid_token("missing bearer token"))?;
-    let caller = oidc::validate(&runtime.issuers, &state.replay, subject)
+    // Revoking is idempotent, so replays are harmless here and the replay
+    // store stays reserved for callers a rule accepts.
+    let (caller, _) = oidc::validate(&runtime.issuers, subject)
       .await
       .map_err(ApiError::invalid_token)?;
     audit.caller(&caller);
@@ -703,5 +742,33 @@ async fn exchange(
       .into_response()
     }
     Err(e) => e.into_response(),
+  }
+}
+
+#[cfg(test)]
+mod test {
+  use super::*;
+
+  #[test]
+  fn forwarded_ip_walks_all_header_lines() {
+    let proxies: Vec<ipnet::IpNet> = vec!["10.0.0.0/8".parse().unwrap()];
+    let proxy: IpAddr = "10.0.0.5".parse().unwrap();
+    let mut headers = HeaderMap::new();
+    // Client-supplied first line, proxy-added second line.
+    headers.append("x-forwarded-for", "6.6.6.6".parse().unwrap());
+    headers.append("x-forwarded-for", "1.2.3.4".parse().unwrap());
+    assert_eq!(
+      forwarded_ip(&proxies, proxy, &headers),
+      "1.2.3.4".parse::<IpAddr>().unwrap()
+    );
+
+    // An unparsable hop stops the walk at the last trusted address.
+    let mut headers = HeaderMap::new();
+    headers.insert("x-forwarded-for", "6.6.6.6, unknown".parse().unwrap());
+    assert_eq!(forwarded_ip(&proxies, proxy, &headers), proxy);
+
+    // Untrusted peers are never overridden.
+    let peer: IpAddr = "8.8.8.8".parse().unwrap();
+    assert_eq!(forwarded_ip(&proxies, peer, &headers), peer);
   }
 }

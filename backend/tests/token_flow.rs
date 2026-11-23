@@ -443,3 +443,51 @@ async fn secondary_rate_limit_backs_off() {
   assert_eq!(status, 502);
   assert_eq!(count(&s.mock.received_requests().await.unwrap()), first);
 }
+
+#[tokio::test]
+async fn foreign_callers_never_reach_the_replay_store() {
+  let s = TestServer::start().await;
+  // Owner 999 matches no rule: denied twice, never "replayed".
+  let token = s.token("Stranger/x", 9, 999);
+  assert_eq!(s.post_token(&token, json!({})).await.0, 403);
+  assert_eq!(s.post_token(&token, json!({})).await.0, 403);
+}
+
+#[tokio::test]
+async fn requested_names_outside_owner_or_installation_are_denied() {
+  let s = TestServer::start().await;
+  let before = s.mock.received_requests().await.unwrap().len();
+  // Owner-wide grant: another owner's name is refused before any lookup.
+  let (status, body) = s
+    .post_token(
+      &s.token("Profiidev/nix", 42, OWNER_ID),
+      json!({ "profile": "org-wide", "repositories": ["OtherOrg/lib"] }),
+    )
+    .await;
+  assert_eq!(status, 403, "{body}");
+  let calls = s.mock.received_requests().await.unwrap();
+  assert!(
+    !calls[before..]
+      .iter()
+      .any(|r| r.url.path().contains("OtherOrg"))
+  );
+
+  // Owner-wide subset of the own installation works.
+  let (status, body) = s
+    .post_token(
+      &s.token("Profiidev/nix", 42, OWNER_ID),
+      json!({ "profile": "org-wide", "repositories": ["Profiidev/foo"] }),
+    )
+    .await;
+  assert_eq!(status, 200, "{body}");
+  assert_eq!(body["repository_ids"], json!([1]));
+
+  // ID-only grant: a name in another installation answers 403, not 400.
+  let (status, body) = s
+    .post_token(
+      &s.token("Profiidev/nix", 42, OWNER_ID),
+      json!({ "profile": "by-id", "repositories": ["OtherOrg/lib"] }),
+    )
+    .await;
+  assert_eq!(status, 403, "{body}");
+}

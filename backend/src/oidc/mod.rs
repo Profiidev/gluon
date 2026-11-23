@@ -46,7 +46,7 @@ impl ReplayCache {
   }
 
   /// Record `key` until `expires_at` (unix seconds); errors on replay or when full.
-  fn insert(&self, key: String, expires_at: u64) -> Result<(), String> {
+  pub fn insert(&self, key: String, expires_at: u64) -> Result<(), String> {
     let now = jsonwebtoken::get_current_timestamp();
     let mut seen = self.seen.lock().unwrap();
     if seen.get(&key).is_some_and(|e| *e >= now) {
@@ -194,12 +194,28 @@ impl Issuer {
     state.keys.get(kid).cloned()
   }
 
-  /// Look up a key; on a miss or stale cache refetch at most once per
-  /// interval, with concurrent requests sharing one fetch. Stale keys are
-  /// used while the issuer is unreachable.
-  async fn key(&self, kid: &str) -> Option<DecodingKey> {
+  /// Look up a key. A stale but known key is returned at once and refreshed in
+  /// the background; only an unknown key waits for a fetch. Fetches are
+  /// single-flight and at most once per interval.
+  async fn key(self: &Arc<Self>, kid: &str) -> Option<DecodingKey> {
     if let Some(k) = self.cached(kid, true).await {
       return Some(k);
+    }
+    if let Some(stale) = self.cached(kid, false).await {
+      if let Ok(mut last) = self.refresh_lock.try_lock()
+        && last.is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL)
+      {
+        *last = Some(Instant::now());
+        drop(last);
+        let issuer = self.clone();
+        tokio::spawn(async move {
+          let _guard = issuer.refresh_lock.lock().await;
+          if let Err(e) = issuer.refresh().await {
+            warn!("jwks refresh for {} failed: {e}", issuer.config.name);
+          }
+        });
+      }
+      return Some(stale);
     }
     let mut last = self.refresh_lock.lock().await;
     if let Some(k) = self.cached(kid, true).await {
@@ -216,13 +232,13 @@ impl Issuer {
   }
 }
 
-/// Validate a subject token against the configured issuers.
-/// The error is a log-only reason.
+/// Validate a subject token against the configured issuers. Returns the caller
+/// and, when replay protection is on, the replay key to record once the
+/// request is authorized. The error is a log-only reason.
 pub async fn validate(
   issuers: &[Arc<Issuer>],
-  replay: &ReplayCache,
   token: &str,
-) -> Result<Caller, String> {
+) -> Result<(Caller, Option<(String, u64)>), String> {
   let header = jsonwebtoken::decode_header(token).map_err(|e| format!("header: {e}"))?;
   let unverified: Map<String, Value> =
     jsonwebtoken::dangerous::insecure_decode_claims(token).map_err(|e| format!("claims: {e}"))?;
@@ -283,13 +299,15 @@ pub async fn validate(
 
   let caller = Caller::from_claims(cfg, claims);
 
-  if cfg.replay_protection {
+  let replay_key = if cfg.replay_protection {
     let jti = caller.jti.as_deref().ok_or("missing jti")?;
     // Keep the entry for as long as the token could still be accepted.
     let expires_at = iat + cfg.max_token_age.as_secs() + cfg.clock_skew.as_secs();
-    replay.insert(format!("{}|{jti}", cfg.url), expires_at)?;
-  }
-  Ok(caller)
+    Some((format!("{}|{jti}", cfg.url), expires_at))
+  } else {
+    None
+  };
+  Ok((caller, replay_key))
 }
 
 #[cfg(test)]

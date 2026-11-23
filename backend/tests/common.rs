@@ -126,6 +126,19 @@ permissions = {{ contents = "write", packages = "write" }}
 match = {{ ref_type = "tag" }}
 
 [[profiles]]
+name = "org-wide"
+target = "owner"
+allow_owner_wide = true
+allow_caller_target = true
+permissions = {{ contents = "read" }}
+
+[[profiles]]
+name = "by-id"
+repositories = [42]
+allow_caller_target = true
+permissions = {{ contents = "read" }}
+
+[[profiles]]
 name = "cross-install"
 repositories = ["Profiidev/nix", "OtherOrg/lib"]
 permissions = {{ contents = "read" }}
@@ -324,6 +337,13 @@ async fn mount_github(mock: &MockServer, mints: Arc<Mutex<Vec<Value>>>) {
   Mock::given(method("GET"))
     .and(path("/app/installations/557"))
     .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "message": "boom" })))
+    .mount(mock)
+    .await;
+  Mock::given(method("GET"))
+    .and(path("/installation/repositories"))
+    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+      "repositories": [{ "id": 1 }, { "id": 42 }, { "id": 43 }]
+    })))
     .mount(mock)
     .await;
   Mock::given(method("DELETE"))
