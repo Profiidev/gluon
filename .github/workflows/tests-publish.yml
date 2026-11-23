@@ -1,0 +1,37 @@
+name: Publish Test Results
+on:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
+
+jobs:
+  publish:
+    name: Publish test results
+    runs-on: ubuntu-latest
+    # Never check out or run code from the PR here, this job has a write token
+    if: github.event.workflow_run.conclusion != 'skipped'
+    permissions:
+      actions: read
+      checks: write
+      pull-requests: write
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.COMMIT_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.COMMIT_BOT_PRIVATE_KEY }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          commit: ${{ github.event.workflow_run.head_sha }}
+          event_file: artifacts/event-file/event.json
+          event_name: ${{ github.event.workflow_run.event }}
+          files: artifacts/test-results*/**/*.xml

@@ -1,0 +1,14 @@
+services:
+  backend:
+    image: ghcr.io/profiidev/images/rust-musl-watch:main@sha256:b40f893446b80ba8d5c5ac9c80031b92b4355a21b388fd3b2c30fc1830ecb03e
+    user: "${HOST_UID:-0}:${HOST_GID:-0}"
+    volumes:
+      - ./backend:/app
+    tty: true
+    ports:
+      - "5173:8000"
+      - "9090:9090"
+    environment:
+      CONFIG_PATH: /app/config.example.toml
+    entrypoint: ["tini", "--"]
+    command: ["cargo", "watch", "-x", "run"]

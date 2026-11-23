@@ -1,0 +1,8 @@
+target
+.env
+node_modules
+backend/Cargo.lock
+/data
+coverage/
+test-results-*.xml
+*.js.map
