@@ -53,14 +53,15 @@ echo "::add-mask::$GH_TOKEN"
 
 ### Replacing the commit-bot secrets
 
-The deployed config has four profiles. They let workflows stop using `COMMIT_BOT_CLIENT_ID` and `COMMIT_BOT_PRIVATE_KEY`. Each profile is pinned to one workflow file and ref through `job_workflow_ref`:
+The deployed config has five profiles. They let workflows stop using `COMMIT_BOT_CLIENT_ID` and `COMMIT_BOT_PRIVATE_KEY`. Each profile is pinned to one workflow file and ref through `job_workflow_ref`:
 
-| Profile      | Workflow                                                                  | Grant                                                                           |
-| ------------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `lint`       | `checks.yml` on same-repo PRs                                             | `contents`, `checks`, `pull_requests`: write                                    |
-| `publish`    | `checks-publish.yml` and `tests-publish.yml` on `workflow_run`, main only | `checks`, `pull_requests`: write; `contents`: read                              |
-| `chart-bump` | `release.yml` on `v*` tags                                                | `contents: write` on `Profiidev/helm-charts` only                               |
-| `renovate`   | `renovate.yml` on main or its own PR runs                                 | `contents`, `pull_requests`, `issues`, `checks`, `statuses`, `workflows`: write |
+| Profile         | Workflow                                                                                   | Grant                                              |
+| --------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| `lint`          | `checks.yml` on same-repo PRs                                                              | `contents`, `checks`, `pull_requests`: write       |
+| `publish`       | `checks-publish.yml` and `tests-publish.yml` on `workflow_run`, main only                  | `checks`, `pull_requests`: write; `contents`: read |
+| `chart-bump`    | `release.yml` on `v*` tags                                                                 | `contents: write` on `Profiidev/helm-charts` only  |
+| `renovate`      |
+| `pr-automation` | `auto-merge-*.yml`, `create-release.yml` (PR job), `fix-package-json.yml` on PR merge refs | `contents`, `pull_requests`: write                 | `renovate.yml` on main or its own PR runs | `contents`, `pull_requests`, `issues`, `checks`, `statuses`, `workflows`: write |
 
 Release PRs, auto-merge, tags and releases need no profile, because the default self-scope grant covers them.
 

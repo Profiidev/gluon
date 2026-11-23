@@ -581,6 +581,11 @@ mod ci_profiles {
     assert_eq!(d.repository_ids, vec![7]);
     assert_eq!(d.permissions["contents"], Level::Write);
     assert_eq!(d.permissions["checks"], Level::Write);
+    run(
+      &ci("linting.yml", "refs/pull/3/merge", "pull_request"),
+      "lint",
+    )
+    .unwrap();
     assert!(
       run(
         &ci("other.yml", "refs/pull/3/merge", "pull_request"),
@@ -635,6 +640,42 @@ mod ci_profiles {
     let mut c = ci("release.yml", "refs/tags/v1.2.3", "push");
     c.job_workflow_ref = Some("someorg/ci/.github/workflows/release.yml@refs/tags/v1.2.3".into());
     assert!(run(&c, "chart-bump").is_err());
+  }
+
+  #[test]
+  fn pr_automation() {
+    for wf in [
+      "auto-merge-release.yml",
+      "auto-merge-helm-chart-bump.yml",
+      "create-release.yml",
+      "fix-package-json.yml",
+    ] {
+      let d = run(
+        &ci(wf, "refs/pull/4/merge", "pull_request"),
+        "pr-automation",
+      )
+      .unwrap();
+      assert_eq!(d.permissions["contents"], Level::Write, "{wf}");
+      assert_eq!(d.permissions["pull_requests"], Level::Write, "{wf}");
+    }
+    assert!(
+      run(
+        &ci("checks.yml", "refs/pull/4/merge", "pull_request"),
+        "pr-automation"
+      )
+      .is_err()
+    );
+    assert!(
+      run(
+        &ci(
+          "create-release.yml",
+          "refs/pull/4/merge",
+          "pull_request_target"
+        ),
+        "pr-automation"
+      )
+      .is_err()
+    );
   }
 
   #[test]
