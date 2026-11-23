@@ -24,7 +24,7 @@ pub struct Runtime {
   pub config: Config,
   pub issuers: Vec<Arc<Issuer>>,
   pub apps: HashMap<String, Arc<GitHubApp>>,
-  pub limiter: Option<DefaultKeyedRateLimiter<String>>,
+  pub limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
 }
 
 impl Runtime {
@@ -63,12 +63,18 @@ impl Runtime {
           .unwrap_or_else(|| Arc::new(Issuer::new(cfg.clone(), http.clone())))
       })
       .collect();
-    let limiter = config.limits.map(|l| {
-      let count = NonZeroU32::new(l.count).unwrap_or(NonZeroU32::MIN);
-      let quota = Quota::with_period(l.per / count.get())
-        .expect("rate period is non-zero")
-        .allow_burst(NonZeroU32::new(l.burst).unwrap_or(NonZeroU32::MIN));
-      DefaultKeyedRateLimiter::keyed(quota)
+    // Unchanged limits keep their limiter, so a reload does not reset quotas.
+    let reused = previous
+      .filter(|p| p.config.limits == config.limits)
+      .and_then(|p| p.limiter.clone());
+    let limiter = reused.or_else(|| {
+      config.limits.map(|l| {
+        let count = NonZeroU32::new(l.count).unwrap_or(NonZeroU32::MIN);
+        let quota = Quota::with_period(l.per / count.get())
+          .expect("rate period is non-zero")
+          .allow_burst(NonZeroU32::new(l.burst).unwrap_or(NonZeroU32::MIN));
+        Arc::new(DefaultKeyedRateLimiter::keyed(quota))
+      })
     });
     Ok(Runtime {
       config,
@@ -168,6 +174,18 @@ pub fn spawn_reloaders(state: Arc<AppState>) {
       info!("SIGHUP received, reloading");
       if let Err(e) = hup.reload() {
         error!("reload failed, keeping current config: {e}");
+      }
+    }
+  });
+
+  // Drop limiter entries whose quota has fully recovered.
+  let cleanup = state.clone();
+  tokio::spawn(async move {
+    loop {
+      tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+      if let Some(limiter) = &cleanup.runtime.load().limiter {
+        limiter.retain_recent();
+        limiter.shrink_to_fit();
       }
     }
   });

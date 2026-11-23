@@ -304,6 +304,31 @@ async fn issue(
   result
 }
 
+/// Per-repository limit. Only checked for callers a rule accepts, so the
+/// limiter's key set stays bounded by the configured accounts.
+fn rate_limit(runtime: &crate::state::Runtime, caller: &Caller) -> Result<(), ApiError> {
+  let Some(limiter) = &runtime.limiter else {
+    return Ok(());
+  };
+  let key = format!(
+    "{}|{}",
+    caller.issuer,
+    caller
+      .repository_id
+      .clone()
+      .or(caller.sub.clone())
+      .unwrap_or_default()
+  );
+  if limiter.check_key(&key).is_err() {
+    return Err(ApiError::new(
+      StatusCode::TOO_MANY_REQUESTS,
+      "rate_limited",
+      format!("rate limit for {key}"),
+    ));
+  }
+  Ok(())
+}
+
 async fn issue_inner(
   state: &AppState,
   subject: Option<&str>,
@@ -316,25 +341,6 @@ async fn issue_inner(
     .await
     .map_err(ApiError::invalid_token)?;
   audit.caller(&caller);
-
-  if let Some(limiter) = &runtime.limiter {
-    let key = format!(
-      "{}|{}",
-      caller.issuer,
-      caller
-        .repository_id
-        .clone()
-        .or(caller.sub.clone())
-        .unwrap_or_default()
-    );
-    if limiter.check_key(&key).is_err() {
-      return Err(ApiError::new(
-        StatusCode::TOO_MANY_REQUESTS,
-        "rate_limited",
-        format!("rate limit for {key}"),
-      ));
-    }
-  }
 
   if req.repositories.len() + req.repository_ids.len() > MAX_REQUESTED_TARGETS {
     return Err(ApiError::invalid_request("too many requested targets"));
@@ -355,6 +361,8 @@ async fn issue_inner(
       .insert(key, expires_at)
       .map_err(ApiError::invalid_token)?;
   }
+  // After the replay check, so replayed tokens cannot use up a repository's quota.
+  rate_limit(&runtime, &caller)?;
   audit.rule = Some(rule.name.clone());
   audit.app = Some(rule.grant.app.clone());
   let app = runtime
@@ -645,15 +653,19 @@ async fn delete_token(
       .await
       .map_err(ApiError::invalid_token)?;
     audit.caller(&caller);
+    // Only callers some rule accepts may use the broker's GitHub client at all.
+    let rule = policy::select(&caller, &TokenRequest::default(), &runtime.config.policy)?;
+    audit.rule = Some(rule.name.clone());
+    rate_limit(&runtime, &caller)?;
     let req: RevokeRequest =
       serde_json::from_slice(&body).map_err(|e| ApiError::invalid_request(e.to_string()))?;
     audit.token_sha256 = Some(token_hash(&req.token));
-    // Revocation authenticates with the token itself; any app client works.
+    // Revocation authenticates with the token itself; the rule's app client is used.
     let app = runtime
       .apps
-      .values()
-      .next()
-      .ok_or_else(|| ApiError::upstream("no app configured"))?;
+      .get(&rule.grant.app)
+      .ok_or_else(|| ApiError::upstream("app missing from runtime"))?;
+    audit.app = Some(rule.grant.app.clone());
     app.revoke(&req.token).await?;
     Ok(StatusCode::NO_CONTENT)
   }

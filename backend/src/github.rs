@@ -281,6 +281,11 @@ impl GitHubApp {
       )
       .set(r as f64);
     }
+    // Only the App's own calls may put the App into backoff: a token-auth
+    // response reflects that token's quota (and the token may be caller-supplied).
+    if !app_auth {
+      return;
+    }
     let secondary = status == StatusCode::TOO_MANY_REQUESTS
       || (status == StatusCode::FORBIDDEN
         && body["message"]

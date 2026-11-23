@@ -491,3 +491,62 @@ async fn requested_names_outside_owner_or_installation_are_denied() {
     .await;
   assert_eq!(status, 403, "{body}");
 }
+
+#[tokio::test]
+async fn revoke_needs_a_rule_and_cannot_freeze_the_app() {
+  use wiremock::{
+    Mock, ResponseTemplate,
+    matchers::{header, method, path},
+  };
+  let s = TestServer::start().await;
+  // A caller no rule accepts cannot use revoke at all.
+  let res = s
+    .client
+    .delete(format!("{}/api/v1/token", s.url))
+    .bearer_auth(s.token("Stranger/x", 9, 999))
+    .json(&json!({ "token": "ghs_abc" }))
+    .send()
+    .await
+    .unwrap();
+  assert_eq!(res.status(), 403);
+
+  // A caller-supplied token that is itself rate limited must not put the App into backoff.
+  Mock::given(method("DELETE"))
+    .and(path("/installation/token"))
+    .and(header("authorization", "Bearer ghs_limited"))
+    .respond_with(
+      ResponseTemplate::new(429)
+        .insert_header("retry-after", "600")
+        .insert_header("x-ratelimit-remaining", "0"),
+    )
+    .with_priority(1)
+    .mount(&s.mock)
+    .await;
+  let res = s
+    .client
+    .delete(format!("{}/api/v1/token", s.url))
+    .bearer_auth(s.token("Profiidev/nix", 42, OWNER_ID))
+    .json(&json!({ "token": "ghs_limited" }))
+    .send()
+    .await
+    .unwrap();
+  assert_eq!(res.status(), 502);
+  let (status, body) = s
+    .post_token(&s.token("Profiidev/nix", 42, OWNER_ID), json!({}))
+    .await;
+  assert_eq!(status, 200, "minting still works: {body}");
+}
+
+#[tokio::test]
+async fn replays_do_not_use_up_the_quota() {
+  let s = TestServer::start_with("[limits]\nper_repository = \"2/min\"\nburst = 2").await;
+  let used = s.token("Profiidev/nix", 42, OWNER_ID);
+  assert_eq!(s.post_token(&used, json!({})).await.0, 200);
+  for _ in 0..3 {
+    assert_eq!(s.post_token(&used, json!({})).await.0, 401);
+  }
+  let (status, body) = s
+    .post_token(&s.token("Profiidev/nix", 42, OWNER_ID), json!({}))
+    .await;
+  assert_eq!(status, 200, "{body}");
+}
