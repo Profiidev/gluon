@@ -10,6 +10,9 @@ on:
     tags:
       - "v*.*.*"
 
+env:
+  HAS_COMMIT_BOT_KEY: ${{ secrets.COMMIT_BOT_PRIVATE_KEY != '' }}
+
 jobs:
   create-release-tag:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.merged && contains(github.event.pull_request.labels.*.name, 'release-version') }}
@@ -19,13 +22,21 @@ jobs:
       contents: read
     steps:
       - uses: profiidev/gluon@d715c4a8bd804db764307ad041e73c1c60ec7382 # v0
-        id: app-token
+        id: gluon
+        if: env.HAS_COMMIT_BOT_KEY != 'true'
         with:
           url: https://gluon.profidev.io
           profile: pr-automation
+      # Fallback while the broker is down: re-add the COMMIT_BOT_PRIVATE_KEY secret.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: app-token
+        if: env.HAS_COMMIT_BOT_KEY == 'true'
+        with:
+          client-id: Iv23liM4eWCXa0R0IMG9
+          private-key: ${{ secrets.COMMIT_BOT_PRIVATE_KEY }}
       - name: Checkout code
         with:
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.gluon.outputs.token || steps.app-token.outputs.token }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Create tag
@@ -55,14 +66,22 @@ jobs:
       contents: read
     steps:
       - uses: profiidev/gluon@d715c4a8bd804db764307ad041e73c1c60ec7382 # v0
-        id: app-token
+        id: gluon
+        if: env.HAS_COMMIT_BOT_KEY != 'true'
         with:
           url: https://gluon.profidev.io
+      # Fallback while the broker is down: re-add the COMMIT_BOT_PRIVATE_KEY secret.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: app-token
+        if: env.HAS_COMMIT_BOT_KEY == 'true'
+        with:
+          client-id: Iv23liM4eWCXa0R0IMG9
+          private-key: ${{ secrets.COMMIT_BOT_PRIVATE_KEY }}
       - name: Create Release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           tag_name: ${{ github.ref_name }}
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.gluon.outputs.token || steps.app-token.outputs.token }}
           name: Release ${{ github.ref_name }}
           body: |
             Release version ${{ github.ref_name }} has been created.
