@@ -10,7 +10,7 @@ use crate::oidc::caller::Caller;
 
 pub mod matcher;
 
-/// H4
+/// Need `allow_dangerous` on the rule.
 pub const DANGEROUS_PERMISSIONS: &[&str] = &[
   "administration",
   "workflows",
@@ -19,7 +19,7 @@ pub const DANGEROUS_PERMISSIONS: &[&str] = &[
   "organization_administration",
 ];
 
-/// H1
+/// Denied unless the rule lists them in `allow_events`.
 const HARDENED_EVENTS: &[&str] = &["pull_request_target", "workflow_run"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -82,11 +82,11 @@ pub struct Grant {
 
 #[derive(Debug, Default)]
 pub struct Hardening {
-  /// H1 opt-in for `pull_request_target` / `workflow_run`.
+  /// Opt-in for `pull_request_target` / `workflow_run`.
   pub allow_events: Vec<String>,
-  /// H2 opt-out.
+  /// Keep write permissions on refs that are not a branch or tag.
   pub allow_non_branch_write: bool,
-  /// H4 opt-in.
+  /// Allow dangerous permissions.
   pub allow_dangerous: bool,
 }
 
@@ -137,7 +137,7 @@ fn denied<T>(msg: impl Into<String>) -> Result<T, EvalError> {
   Err(EvalError::Denied(msg.into()))
 }
 
-/// Whether an allow rule applies, including H1.
+/// Whether an allow rule applies, including the event check.
 fn allow_matches(rule: &Rule, caller: &Caller) -> bool {
   if let Some(event) = caller.event_name.as_deref()
     && HARDENED_EVENTS.contains(&event)
@@ -214,7 +214,7 @@ pub struct Decision {
   pub permissions: Permissions,
 }
 
-/// H2: is the caller on something other than a branch or tag?
+/// Is the caller on something other than a branch or tag?
 fn is_non_branch_ref(caller: &Caller) -> bool {
   let ref_ok = matches!(caller.ref_type.as_deref(), Some("branch" | "tag"));
   let pr_ref = caller

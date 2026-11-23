@@ -1,4 +1,4 @@
-//! T4: `--check` and atomic reload.
+//! `--check` and atomic reload.
 
 mod common;
 

@@ -22,7 +22,7 @@ impl fmt::Debug for AppKey {
 
 impl AppKey {
   // shortcut: jsonwebtoken's EncodingKey keeps its own copy of the DER bytes
-  // and does not zeroize it on drop; an external signer (K4) would fix that.
+  // and does not zeroize it on drop; an external signer would fix that.
   pub fn load(source: &KeySource) -> Result<AppKey, String> {
     let (pem, origin) = match source {
       KeySource::File { path } => (read_file(path)?, format!("file:{}", path.display())),

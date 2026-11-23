@@ -1,4 +1,4 @@
-//! T2: subject token validation.
+//! Subject token validation.
 
 use std::sync::Arc;
 

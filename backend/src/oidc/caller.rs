@@ -1,4 +1,4 @@
-//! Internal caller model and issuer-specific claim mapping (V9).
+//! Internal caller model and issuer-specific claim mapping.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -100,7 +100,7 @@ impl Caller {
       jti: claims.get("jti").and_then(claim_string),
       claims: Map::new(),
     };
-    // Older issuers omit ref_type; derive it so H2 still works.
+    // Older issuers omit ref_type; derive it so the non-branch write downgrade still works.
     if c.ref_type.is_none() {
       c.ref_type = c.ref_.as_deref().and_then(|r| {
         if r.starts_with("refs/heads/") {

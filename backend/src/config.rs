@@ -613,7 +613,7 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
     profiles.insert(rule.name.clone(), rule);
   }
 
-  // H4: dangerous permissions need an explicit opt-in.
+  // Dangerous permissions need an explicit opt-in.
   for rule in rules.iter().chain(profiles.values()) {
     if rule.effect == Effect::Allow
       && !rule.hardening.allow_dangerous
@@ -668,7 +668,7 @@ fn compile_issuer(i: RawIssuer) -> Result<IssuerConfig, String> {
   if i.audience.is_empty() {
     return Err(ctx("audience is empty".into()));
   }
-  // V3: GitHub's default audience is the owner URL; it must never be accepted.
+  // GitHub's default audience is the owner URL; it must never be accepted.
   if i.audience.starts_with("https://github.com") {
     return Err(ctx(
       "audience must not be GitHub's default owner URL".into(),
@@ -823,7 +823,7 @@ owner_ids = [1]
 permissions = { contents = "read" }
 "#;
 
-  /// T4: every one of these must be rejected as a whole.
+  /// Every one of these must be rejected as a whole.
   #[test]
   fn invalid_configs_are_rejected() {
     let cases: &[(&str, &str)] = &[

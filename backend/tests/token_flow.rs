@@ -1,11 +1,11 @@
-//! T3: end-to-end token flows against a mocked GitHub API.
+//! End-to-end token flows against a mocked GitHub API.
 
 mod common;
 
 use common::*;
 use serde_json::{Value, json};
 
-/// Every mint is scoped by repositories and permissions (GH2).
+/// Every mint is scoped by repositories and permissions.
 fn assert_mints_scoped(server: &TestServer) {
   let mints = server.mint_bodies();
   assert!(!mints.is_empty());

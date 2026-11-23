@@ -147,7 +147,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
   std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// SIGHUP (K5) and polling for ConfigMap/Secret updates, which send no signal.
+/// SIGHUP and polling for ConfigMap/Secret updates, which send no signal.
 pub fn spawn_reloaders(state: Arc<AppState>) {
   let hup = state.clone();
   tokio::spawn(async move {

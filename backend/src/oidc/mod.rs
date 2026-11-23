@@ -21,11 +21,11 @@ pub mod caller;
 
 pub use caller::Caller;
 
-/// Minimum time between JWKS refetches triggered by unknown `kid`s (V8).
+/// Minimum time between JWKS refetches triggered by unknown `kid`s.
 const FORCED_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(3600);
 
-/// Replay set shared by all issuers, kept across config reloads (V7).
+/// Replay set shared by all issuers, kept across config reloads.
 pub type ReplayCache = Cache<String, ()>;
 
 pub fn replay_cache() -> ReplayCache {
@@ -168,7 +168,7 @@ impl Issuer {
   }
 }
 
-/// Validate a subject token against the configured issuers (V1-V7).
+/// Validate a subject token against the configured issuers.
 /// The error is a log-only reason.
 pub async fn validate(
   issuers: &[Arc<Issuer>],

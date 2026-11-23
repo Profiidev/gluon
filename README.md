@@ -173,13 +173,13 @@ Regexes are anchored. In globs, `*` does not cross `/`; use `**` for that.
 
 Per-rule flags:
 
-| Flag                     | Effect                                                                                                                                                                             |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `allow_caller_target`    | The caller may request a subset of the target. Asking for exactly the target always works.                                                                                         |
-| `allow_owner_wide`       | Required for `target = "owner"`.                                                                                                                                                   |
-| `allow_events = [..]`    | H1: `pull_request_target` and `workflow_run` are denied unless listed here.                                                                                                        |
-| `allow_non_branch_write` | H2: on refs that are not a branch or tag (for example `refs/pull/*`), unrequested write permissions become read, and an explicit write request gets 403. This flag turns that off. |
-| `allow_dangerous`        | H4: required for `administration`, `workflows`, `secrets`, `members` and `organization_administration`.                                                                            |
+| Flag                     | Effect                                                                                                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `allow_caller_target`    | The caller may request a subset of the target. Asking for exactly the target always works.                                                                                     |
+| `allow_owner_wide`       | Required for `target = "owner"`.                                                                                                                                               |
+| `allow_events = [..]`    | `pull_request_target` and `workflow_run` are denied unless listed here.                                                                                                        |
+| `allow_non_branch_write` | On refs that are not a branch or tag (for example `refs/pull/*`), unrequested write permissions become read, and an explicit write request gets 403. This flag turns that off. |
+| `allow_dangerous`        | Required for `administration`, `workflows`, `secrets`, `members` and `organization_administration`.                                                                            |
 
 A token never exceeds `requested ∩ rule ∩ installation`. An explicitly requested permission above the rule gets 403. One above what the installation has gets 422. All targets must be in one installation, otherwise 400.
 

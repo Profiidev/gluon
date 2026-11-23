@@ -1,4 +1,4 @@
-//! T1: table-driven policy evaluation tests.
+//! Table-driven policy evaluation tests.
 
 use super::*;
 use crate::config::Config;
@@ -367,13 +367,13 @@ fn table() {
       expect: Err(denied_any()),
     },
     Case {
-      name: "H1 workflow_run denied by default",
+      name: "workflow_run denied by default",
       caller: with(caller(1), |c| c.event_name = Some("workflow_run".into())),
       req: TokenRequest::default(),
       expect: Err(denied_any()),
     },
     Case {
-      name: "H1 pull_request_target denied by default",
+      name: "pull_request_target denied by default",
       caller: with(caller(1), |c| {
         c.event_name = Some("pull_request_target".into())
       }),
@@ -381,13 +381,13 @@ fn table() {
       expect: Err(denied_any()),
     },
     Case {
-      name: "H1 opt-in per rule",
+      name: "opt-in per rule",
       caller: with(caller(14), |c| c.event_name = Some("workflow_run".into())),
       req: TokenRequest::default(),
       expect: Ok(("override-14", vec![14], default_perms.clone())),
     },
     Case {
-      name: "H2 PR ref downgrades to read",
+      name: "PR ref downgrades to read",
       caller: with(caller(1), |c| {
         c.ref_ = Some("refs/pull/5/merge".into());
         c.ref_type = None;
@@ -405,7 +405,7 @@ fn table() {
       )),
     },
     Case {
-      name: "H2 explicit write on PR ref is 403",
+      name: "explicit write on PR ref is 403",
       caller: with(caller(1), |c| {
         c.ref_ = Some("refs/pull/5/merge".into());
         c.ref_type = None;
@@ -417,7 +417,7 @@ fn table() {
       expect: Err(denied_any()),
     },
     Case {
-      name: "H2 opt-out keeps write",
+      name: "opt-out keeps write",
       caller: with(caller(15), |c| {
         c.ref_ = Some("refs/pull/5/merge".into());
         c.ref_type = None;
@@ -426,7 +426,7 @@ fn table() {
       expect: Ok(("override-15", vec![15], default_perms.clone())),
     },
     Case {
-      name: "H4 dangerous only via opted-in profile",
+      name: "dangerous only via opted-in profile",
       caller: caller(1),
       req: TokenRequest {
         profile: Some("admin".into()),
@@ -435,7 +435,7 @@ fn table() {
       expect: Ok(("admin", vec![1], perms(&[("administration", Level::Write)]))),
     },
     Case {
-      name: "H4 dangerous permission request on default is 403",
+      name: "dangerous permission request on default is 403",
       caller: caller(1),
       req: TokenRequest {
         permissions: perms(&[("administration", Level::Write)]),

@@ -71,7 +71,7 @@ struct AppClaims<'a> {
 pub struct GitHubApp {
   pub config: AppConfig,
   keys: Vec<AppKey>,
-  /// Index of the key that last worked (K2).
+  /// Index of the key that last worked.
   key_index: AtomicUsize,
   jwt: Mutex<Option<(String, u64, usize)>>,
   http: reqwest::Client,
@@ -107,7 +107,7 @@ impl GitHubApp {
     }
   }
 
-  /// GH1: RS256 app JWT, cached and refreshed one minute before expiry.
+  /// RS256 app JWT, cached and refreshed one minute before expiry.
   fn app_jwt(&self, key: usize) -> GhResult<String> {
     let mut cache = self.jwt.lock().unwrap();
     if let Some((jwt, exp, k)) = cache.as_ref()
@@ -133,7 +133,7 @@ impl GitHubApp {
     Ok(jwt)
   }
 
-  /// Send a request; for app-JWT calls a 401 rotates through the keys (K2).
+  /// Send a request; for app-JWT calls a 401 rotates through the keys.
   #[instrument(skip(self, auth, body), fields(app = %self.config.name))]
   async fn call(
     &self,
@@ -198,7 +198,7 @@ impl GitHubApp {
     Err(GhError::Upstream(format!("{endpoint}: no key accepted")))
   }
 
-  /// GH6: record remaining quota and back off on 403/429 rate limits.
+  /// Record remaining quota and back off on 403/429 rate limits.
   fn track_rate_limit(&self, res: &reqwest::Response, app_auth: bool) {
     let header = |name: &str| {
       res
@@ -252,7 +252,7 @@ impl GitHubApp {
     })
   }
 
-  /// GH3: installation for an account; static config wins.
+  /// Installation for an account; static config wins.
   pub async fn installation_for_owner(&self, owner_id: u64, owner_login: &str) -> GhResult<u64> {
     if let Some(id) = self.config.installations.get(&owner_id) {
       return Ok(*id);
@@ -284,7 +284,7 @@ impl GitHubApp {
     Ok(id)
   }
 
-  /// GH4: permissions the installation actually has (cached 5 min).
+  /// Permissions the installation actually has (cached 5 min).
   pub async fn installation_permissions(&self, installation_id: u64) -> GhResult<Permissions> {
     if let Some(p) = self.installation_permissions.get(&installation_id) {
       return Ok(p);
@@ -317,7 +317,7 @@ impl GitHubApp {
     Ok(perms)
   }
 
-  /// GH5: resolve `owner/name` to its ID, owner and installation.
+  /// Resolve `owner/name` to its ID, owner and installation.
   pub async fn resolve_repo(&self, full_name: &str) -> GhResult<RepoInfo> {
     let key = full_name.to_ascii_lowercase();
     if let Some(info) = self.repos.get(&key) {
@@ -414,7 +414,7 @@ impl GitHubApp {
     serde_json::from_value(body).map_err(|e| GhError::Upstream(format!("mint response: {e}")))
   }
 
-  /// GH2: always scoped by repository_ids and permissions.
+  /// Mint a token, always scoped by repository_ids and permissions.
   pub async fn mint(
     &self,
     installation_id: u64,
