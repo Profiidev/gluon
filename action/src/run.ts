@@ -51,6 +51,16 @@ export const parseRepositories = (input: string) => {
   return { repositories, repositoryIds };
 };
 
+// The OIDC token is a bearer credential: only send it over TLS (or to localhost).
+export const brokerUrl = (input: string) => {
+  const url = new URL(input),
+    local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
+    throw new Error(`Broker URL must use https: ${url.origin}`);
+  }
+  return url.href.replace(/\/+$/, '');
+};
+
 const errorMessage = async (res: Response) => {
   try {
     const body = (await res.json()) as {
@@ -68,7 +78,7 @@ export const main = async () => {
     // Marks the post step; state is only visible to post when set in main.
     core.saveState('isPost', 'true');
 
-    const url = core.getInput('url', { required: true }).replace(/\/+$/, ''),
+    const url = brokerUrl(core.getInput('url', { required: true })),
       audience = core.getInput('audience') || 'github-token-broker',
       profile = core.getInput('profile'),
       permissions = parsePermissions(core.getInput('permissions')),
@@ -90,7 +100,7 @@ export const main = async () => {
     }
 
     const oidc = await core.getIDToken(audience),
-      res = await fetch(`${url}/v1/token`, {
+      res = await fetch(`${url}/api/v1/token`, {
         body: JSON.stringify(body),
         headers: {
           Authorization: `Bearer ${oidc}`,

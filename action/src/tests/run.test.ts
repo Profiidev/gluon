@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@actions/core');
 
 const core = await import('@actions/core'),
-  { main, post, run, parsePermissions, parseRepositories } =
+  { brokerUrl, main, post, run, parsePermissions, parseRepositories } =
     await import('../run'),
   fetchMock = vi.fn(),
   setInputs = (inputs: Record<string, string>) => {
@@ -54,6 +54,17 @@ describe('input parsing', () => {
   });
 });
 
+describe('broker url', () => {
+  it('requires https except for localhost', () => {
+    expect(brokerUrl('https://gluon.example.com/')).toBe(
+      'https://gluon.example.com'
+    );
+    expect(brokerUrl('http://localhost:8000')).toBe('http://localhost:8000');
+    expect(() => brokerUrl('http://gluon.example.com')).toThrow(/https/);
+    expect(() => brokerUrl('not a url')).toThrow();
+  });
+});
+
 describe('main', () => {
   it('requests a token and masks it', async () => {
     setInputs({
@@ -71,7 +82,7 @@ describe('main', () => {
 
     expect(core.getIDToken).toHaveBeenCalledWith('aud');
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://broker.example.com/v1/token');
+    expect(url).toBe('https://broker.example.com/api/v1/token');
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>).Authorization).toBe(
       'Bearer oidc-jwt'
