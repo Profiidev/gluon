@@ -492,3 +492,146 @@ fn rule_choice_is_deterministic() {
     assert_eq!(rule.name, "a-tie");
   }
 }
+
+/// The CI profiles from config.example.toml (used to replace commit-bot secrets).
+mod ci_profiles {
+  use super::*;
+
+  const EXAMPLE: &str = include_str!("../../config.example.toml");
+  const OWNER: u64 = 92174452;
+  const HELM_CHARTS: u64 = 500;
+
+  fn ci(workflow: &str, git_ref: &str, event: &str) -> Caller {
+    let mut c = Caller::test("Profiidev/app", 7, OWNER);
+    c.ref_ = Some(git_ref.into());
+    c.ref_type = if git_ref.starts_with("refs/heads/") {
+      Some("branch".into())
+    } else if git_ref.starts_with("refs/tags/") {
+      Some("tag".into())
+    } else {
+      None
+    };
+    c.event_name = Some(event.into());
+    c.job_workflow_ref = Some(format!(
+      "Profiidev/app/.github/workflows/{workflow}@{git_ref}"
+    ));
+    c
+  }
+
+  fn run(c: &Caller, profile: &str) -> Result<Decision, EvalError> {
+    let policy = Config::parse(EXAMPLE).unwrap().policy;
+    let req = TokenRequest {
+      profile: Some(profile.into()),
+      ..Default::default()
+    };
+    let rule = select(c, &req, &policy)?;
+    let mut rule_targets = Vec::new();
+    if rule.grant.target.include_self {
+      rule_targets.push(7);
+    }
+    // Only named target in these profiles is helm-charts.
+    rule_targets.extend(rule.grant.target.repos.iter().map(|_| HELM_CHARTS));
+    let all: Permissions = [
+      "contents",
+      "checks",
+      "pull_requests",
+      "issues",
+      "statuses",
+      "workflows",
+      "vulnerability_alerts",
+    ]
+    .into_iter()
+    .map(|p| (p.to_string(), Level::Write))
+    .collect();
+    finalize(
+      c,
+      &req,
+      rule,
+      &Resolved {
+        rule_targets,
+        requested_targets: None,
+      },
+      &all,
+    )
+  }
+
+  #[test]
+  fn lint() {
+    let d = run(
+      &ci("checks.yml", "refs/pull/3/merge", "pull_request"),
+      "lint",
+    )
+    .unwrap();
+    assert_eq!(d.repository_ids, vec![7]);
+    assert_eq!(d.permissions["contents"], Level::Write);
+    assert_eq!(d.permissions["checks"], Level::Write);
+    assert!(
+      run(
+        &ci("other.yml", "refs/pull/3/merge", "pull_request"),
+        "lint"
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn publish() {
+    let d = run(
+      &ci("checks-publish.yml", "refs/heads/main", "workflow_run"),
+      "publish",
+    )
+    .unwrap();
+    assert_eq!(d.permissions["checks"], Level::Write);
+    assert_eq!(d.permissions["contents"], Level::Read);
+    run(
+      &ci("tests-publish.yml", "refs/heads/main", "workflow_run"),
+      "publish",
+    )
+    .unwrap();
+    assert!(
+      run(
+        &ci("checks-publish.yml", "refs/heads/dev", "workflow_run"),
+        "publish"
+      )
+      .is_err()
+    );
+    assert!(
+      run(
+        &ci("checks-publish.yml", "refs/heads/main", "push"),
+        "publish"
+      )
+      .is_err()
+    );
+    // workflow_run stays denied for the default rule.
+    let c = ci("checks-publish.yml", "refs/heads/main", "workflow_run");
+    let policy = Config::parse(EXAMPLE).unwrap().policy;
+    assert!(select(&c, &TokenRequest::default(), &policy).is_err());
+  }
+
+  #[test]
+  fn chart_bump() {
+    let d = run(&ci("release.yml", "refs/tags/v1.2.3", "push"), "chart-bump").unwrap();
+    assert_eq!(d.repository_ids, vec![HELM_CHARTS]);
+    assert_eq!(d.permissions, perms(&[("contents", Level::Write)]));
+    assert!(run(&ci("release.yml", "refs/heads/main", "push"), "chart-bump").is_err());
+    assert!(run(&ci("checks.yml", "refs/tags/v1.2.3", "push"), "chart-bump").is_err());
+  }
+
+  #[test]
+  fn renovate() {
+    let d = run(
+      &ci("renovate.yml", "refs/heads/main", "schedule"),
+      "renovate",
+    )
+    .unwrap();
+    assert_eq!(d.permissions["workflows"], Level::Write);
+    let d = run(
+      &ci("renovate.yml", "refs/pull/9/merge", "pull_request"),
+      "renovate",
+    )
+    .unwrap();
+    assert_eq!(d.permissions["workflows"], Level::Write);
+    assert!(run(&ci("renovate.yml", "refs/heads/dev", "push"), "renovate").is_err());
+    assert!(run(&ci("checks.yml", "refs/heads/main", "push"), "renovate").is_err());
+  }
+}
