@@ -34,7 +34,6 @@ pub const REPOS: &[(u64, &str, u64)] = &[
 
 pub struct TestServer {
   pub url: String,
-  pub metrics_url: String,
   pub mock: MockServer,
   pub client: reqwest::Client,
   pub dir: TempDir,
@@ -94,8 +93,6 @@ pub fn config(mock: &str, extra: &str) -> String {
   format!(
     r#"
 [server]
-listen = "127.0.0.1:0"
-metrics_listen = "127.0.0.1:0"
 reload_interval = "0s"
 
 [[issuers]]
@@ -160,15 +157,23 @@ impl TestServer {
     )
     .unwrap();
 
-    let app = App::new(config_path).await.expect("app starts");
+    // Random port; metrics on the main listener under /api/metrics.
+    unsafe {
+      std::env::set_var("PORT", "0");
+      std::env::set_var("LOG_LEVEL", "off");
+      std::env::set_var("METRICS_ENABLED", "true");
+      std::env::remove_var("METRICS_PORT");
+    }
+    let app = App::new(backend::Settings::parse(), config_path)
+      .await
+      .expect("app starts");
     let url = format!("http://127.0.0.1:{}", app.port());
-    let metrics_url = format!("http://127.0.0.1:{}", app.metrics_port().unwrap());
     let app_state = app.state.clone();
     tokio::spawn(app.run());
 
     let client = reqwest::Client::new();
     for _ in 0..100 {
-      if let Ok(r) = client.get(format!("{url}/readyz")).send().await
+      if let Ok(r) = client.get(format!("{url}/api/readyz")).send().await
         && r.status() == 200
       {
         break;
@@ -177,7 +182,6 @@ impl TestServer {
     }
     TestServer {
       url,
-      metrics_url,
       mock,
       client,
       dir,
@@ -238,7 +242,7 @@ impl TestServer {
   pub async fn post_token(&self, bearer: &str, body: Value) -> (u16, Value) {
     let res = self
       .client
-      .post(format!("{}/v1/token", self.url))
+      .post(format!("{}/api/v1/token", self.url))
       .bearer_auth(bearer)
       .json(&body)
       .send()

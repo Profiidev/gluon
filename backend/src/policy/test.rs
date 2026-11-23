@@ -461,6 +461,22 @@ fn table() {
 }
 
 #[test]
+fn replace_override_is_bound_to_owner() {
+  // Same repository_id under a foreign owner (transfer or typo) gets nothing.
+  let c = with(caller(12), |c| c.owner_id = Some("999".into()));
+  assert!(eval(&c, &TokenRequest::default(), &install_all()).is_err());
+}
+
+#[test]
+fn deny_rule_with_broken_cel_denies() {
+  let cfg = format!(
+    "{CONFIG}\n[[rules]]\nname = \"broken\"\neffect = \"deny\"\nmatch = {{ expr = \"caller.claims.nope.startsWith('x')\" }}\n"
+  );
+  let policy = Config::parse(&cfg).unwrap().policy;
+  assert!(select(&caller(1), &TokenRequest::default(), &policy).is_err());
+}
+
+#[test]
 fn installation_permissions_cap_the_grant() {
   // Installation only has contents:read.
   let install = perms(&[("contents", Level::Read)]);
@@ -615,6 +631,10 @@ mod ci_profiles {
     assert_eq!(d.permissions, perms(&[("contents", Level::Write)]));
     assert!(run(&ci("release.yml", "refs/heads/main", "push"), "chart-bump").is_err());
     assert!(run(&ci("checks.yml", "refs/tags/v1.2.3", "push"), "chart-bump").is_err());
+    // A third-party reusable workflow with the same file name never matches.
+    let mut c = ci("release.yml", "refs/tags/v1.2.3", "push");
+    c.job_workflow_ref = Some("someorg/ci/.github/workflows/release.yml@refs/tags/v1.2.3".into());
+    assert!(run(&c, "chart-bump").is_err());
   }
 
   #[test]

@@ -1,16 +1,19 @@
 use std::{path::PathBuf, sync::Arc};
 
-use axum::{Router, routing::get};
+use axum::Router;
 use centaurus::{
-  backend::{init::run_app_connect_info, middleware::logging::logging},
+  backend::{
+    init::{listener_setup, run_app_connect_info},
+    router::build_router,
+  },
   version_header,
 };
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::net::TcpListener;
 use tracing::info;
 
 pub use crate::{
   config::Config,
+  settings::Settings,
   state::{AppState, Runtime},
 };
 
@@ -20,56 +23,32 @@ pub mod github;
 pub mod keys;
 pub mod oidc;
 pub mod policy;
+mod settings;
 pub mod state;
 
 pub struct App {
   app: Router,
   listener: TcpListener,
-  metrics: Option<(Router, TcpListener)>,
   pub state: Arc<AppState>,
 }
 
-fn prometheus() -> PrometheusHandle {
-  static HANDLE: std::sync::OnceLock<PrometheusHandle> = std::sync::OnceLock::new();
-  HANDLE
-    .get_or_init(|| {
-      PrometheusBuilder::new()
-        .install_recorder()
-        .expect("install metrics recorder")
-    })
-    .clone()
-}
-
 impl App {
-  pub async fn new(config_path: PathBuf) -> Result<App, String> {
+  pub async fn new(settings: Settings, config_path: PathBuf) -> Result<App, String> {
     let config = Config::load(&config_path)?;
     let http = state::http_client();
     let runtime = Runtime::build(config, None, &http)?;
-    let server = runtime.config.server.clone();
     let state = Arc::new(AppState::new(runtime, config_path, http));
 
-    let handle = prometheus();
-    let metrics_router =
-      Router::new().route("/metrics", get(move || std::future::ready(handle.render())));
-
-    let mut app = logging(api::router(state.clone()), |path| path.starts_with("/v1"));
+    let listener = listener_setup(settings.base.port).await;
+    let api_state = state.clone();
+    // Routes end up under /api; centaurus adds /api/health, metrics, CORS and logging.
+    let mut app = build_router(
+      |limiter| api::router(api_state, limiter),
+      |router, _| async { router },
+      settings,
+    )
+    .await;
     version_header!(app);
-
-    let listener = TcpListener::bind(server.listen)
-      .await
-      .map_err(|e| format!("bind {}: {e}", server.listen))?;
-    let metrics = match server.metrics_listen {
-      Some(addr) => Some((
-        metrics_router,
-        TcpListener::bind(addr)
-          .await
-          .map_err(|e| format!("bind {addr}: {e}"))?,
-      )),
-      None => {
-        app = app.merge(metrics_router);
-        None
-      }
-    };
 
     state.spawn_jwks_fetch();
     state::spawn_reloaders(state.clone());
@@ -77,7 +56,6 @@ impl App {
     Ok(App {
       app,
       listener,
-      metrics,
       state,
     })
   }
@@ -86,19 +64,8 @@ impl App {
     self.listener.local_addr().expect("listener address").port()
   }
 
-  pub fn metrics_port(&self) -> Option<u16> {
-    self
-      .metrics
-      .as_ref()
-      .map(|(_, l)| l.local_addr().expect("metrics address").port())
-  }
-
   pub async fn run(self) {
     info!("Listening on {}", self.listener.local_addr().unwrap());
-    if let Some((router, listener)) = self.metrics {
-      info!("Metrics on {}", listener.local_addr().unwrap());
-      tokio::spawn(run_app_connect_info(listener, router));
-    }
     run_app_connect_info(self.listener, self.app).await;
   }
 }

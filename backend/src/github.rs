@@ -2,7 +2,7 @@
 
 use std::{
   sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
   },
   time::{Duration, Instant},
@@ -75,10 +75,41 @@ pub struct GitHubApp {
   key_index: AtomicUsize,
   jwt: Mutex<Option<(String, u64, usize)>>,
   http: reqwest::Client,
-  backoff_until: Mutex<Option<Instant>>,
+  // Shared with the previous runtime on reload (moka caches clone by reference).
+  backoff_until: Arc<Mutex<Option<Instant>>>,
   installations: Cache<u64, u64>,
   installation_permissions: Cache<u64, Permissions>,
-  repos: Cache<String, RepoInfo>,
+  repos: Cache<String, Result<RepoInfo, String>>,
+}
+
+/// GitHub login / repository name: `[A-Za-z0-9._-]{1,100}`, not `.` or `..`.
+pub fn valid_name(s: &str) -> bool {
+  (1..=100).contains(&s.len())
+    && s != "."
+    && s != ".."
+    && s
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// `owner/name` with both parts valid.
+pub fn valid_full_name(s: &str) -> bool {
+  s.split_once('/')
+    .is_some_and(|(o, n)| valid_name(o) && valid_name(n))
+}
+
+/// Resolved names live an hour, failures five minutes.
+struct RepoExpiry;
+
+impl moka::Expiry<String, Result<RepoInfo, String>> for RepoExpiry {
+  fn expire_after_create(
+    &self,
+    _key: &String,
+    value: &Result<RepoInfo, String>,
+    _now: Instant,
+  ) -> Option<Duration> {
+    Some(Duration::from_secs(if value.is_ok() { 3600 } else { 300 }))
+  }
 }
 
 fn now() -> u64 {
@@ -86,23 +117,43 @@ fn now() -> u64 {
 }
 
 impl GitHubApp {
-  pub fn new(config: AppConfig, keys: Vec<AppKey>, http: reqwest::Client) -> GitHubApp {
+  /// `previous` with the same config hands over its caches and rate-limit backoff.
+  pub fn new(
+    config: AppConfig,
+    keys: Vec<AppKey>,
+    http: reqwest::Client,
+    previous: Option<&GitHubApp>,
+  ) -> GitHubApp {
+    if let Some(p) = previous.filter(|p| p.config == config) {
+      return GitHubApp {
+        config,
+        keys,
+        key_index: AtomicUsize::new(0),
+        jwt: Mutex::new(None),
+        http,
+        backoff_until: p.backoff_until.clone(),
+        installations: p.installations.clone(),
+        installation_permissions: p.installation_permissions.clone(),
+        repos: p.repos.clone(),
+      };
+    }
     GitHubApp {
       config,
       keys,
       key_index: AtomicUsize::new(0),
       jwt: Mutex::new(None),
       http,
-      backoff_until: Mutex::new(None),
+      backoff_until: Arc::new(Mutex::new(None)),
       installations: Cache::builder()
         .time_to_live(Duration::from_secs(3600))
         .build(),
       installation_permissions: Cache::builder()
         .time_to_live(Duration::from_secs(300))
         .build(),
+      // Failures are cached too, so unknown names cannot be retried in a loop.
       repos: Cache::builder()
         .max_capacity(10_000)
-        .time_to_live(Duration::from_secs(3600))
+        .expire_after(RepoExpiry)
         .build(),
     }
   }
@@ -143,7 +194,10 @@ impl GitHubApp {
     auth: Auth<'_>,
     body: Option<Value>,
   ) -> GhResult<(StatusCode, Value)> {
-    if let Some(until) = *self.backoff_until.lock().unwrap()
+    // Revoking must still work while backing off, or internal tokens would linger.
+    let is_revoke = method == Method::DELETE && path == "/installation/token";
+    if !is_revoke
+      && let Some(until) = *self.backoff_until.lock().unwrap()
       && until > Instant::now()
     {
       return Err(GhError::RateLimited);
@@ -180,7 +234,7 @@ impl GitHubApp {
         "status" => status.as_u16().to_string()
       )
       .increment(1);
-      self.track_rate_limit(&res, matches!(auth, Auth::App));
+      let headers = res.headers().clone();
       if status == StatusCode::UNAUTHORIZED && matches!(auth, Auth::App) && attempt + 1 < attempts {
         warn!(
           "app {}: key {} rejected, trying next key",
@@ -193,16 +247,22 @@ impl GitHubApp {
       }
       let text = res.text().await.unwrap_or_default();
       let value = serde_json::from_str(&text).unwrap_or(Value::Null);
+      self.track_rate_limit(&headers, status, &value, matches!(auth, Auth::App));
       return Ok((status, value));
     }
     Err(GhError::Upstream(format!("{endpoint}: no key accepted")))
   }
 
   /// Record remaining quota and back off on 403/429 rate limits.
-  fn track_rate_limit(&self, res: &reqwest::Response, app_auth: bool) {
+  fn track_rate_limit(
+    &self,
+    headers: &reqwest::header::HeaderMap,
+    status: StatusCode,
+    body: &Value,
+    app_auth: bool,
+  ) {
     let header = |name: &str| {
-      res
-        .headers()
+      headers
         .get(name)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
@@ -217,15 +277,22 @@ impl GitHubApp {
       )
       .set(r as f64);
     }
-    let status = res.status();
-    if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
+    let secondary = status == StatusCode::TOO_MANY_REQUESTS
+      || (status == StatusCode::FORBIDDEN
+        && body["message"]
+          .as_str()
+          .is_some_and(|m| m.to_ascii_lowercase().contains("rate limit")));
+    if !secondary && !(status == StatusCode::FORBIDDEN && remaining == Some(0)) {
       return;
     }
-    let wait = header("retry-after").or_else(|| {
-      (remaining == Some(0))
-        .then(|| header("x-ratelimit-reset").map(|reset| reset.saturating_sub(now())))
-        .flatten()
-    });
+    // GitHub: honour retry-after, else wait for the reset, else at least a minute.
+    let wait = header("retry-after")
+      .or_else(|| {
+        (remaining == Some(0))
+          .then(|| header("x-ratelimit-reset").map(|reset| reset.saturating_sub(now())))
+          .flatten()
+      })
+      .or(Some(60));
     if let Some(secs) = wait {
       let secs = secs.clamp(1, 900);
       warn!(
@@ -254,6 +321,9 @@ impl GitHubApp {
 
   /// Installation for an account; static config wins.
   pub async fn installation_for_owner(&self, owner_id: u64, owner_login: &str) -> GhResult<u64> {
+    if !valid_name(owner_login) {
+      return Err(GhError::NotInstalled("invalid owner login".into()));
+    }
     if let Some(id) = self.config.installations.get(&owner_id) {
       return Ok(*id);
     }
@@ -320,12 +390,24 @@ impl GitHubApp {
   /// Resolve `owner/name` to its ID, owner and installation.
   pub async fn resolve_repo(&self, full_name: &str) -> GhResult<RepoInfo> {
     let key = full_name.to_ascii_lowercase();
-    if let Some(info) = self.repos.get(&key) {
-      return Ok(info);
+    if let Some(cached) = self.repos.get(&key) {
+      return cached.map_err(GhError::NotInstalled);
     }
-    let (owner, name) = full_name
-      .split_once('/')
-      .ok_or_else(|| GhError::NotInstalled(format!("bad repository {full_name}")))?;
+    let result = self.lookup_repo(full_name).await;
+    match &result {
+      Ok(info) => self.repos.insert(key, Ok(info.clone())),
+      Err(GhError::NotInstalled(e)) => self.repos.insert(key, Err(e.clone())),
+      // Transient failures are not cached.
+      Err(_) => {}
+    }
+    result
+  }
+
+  async fn lookup_repo(&self, full_name: &str) -> GhResult<RepoInfo> {
+    if !valid_full_name(full_name) {
+      return Err(GhError::NotInstalled("invalid repository name".into()));
+    }
+    let (owner, name) = full_name.split_once('/').unwrap();
     let (status, body) = self
       .call(
         Method::GET,
@@ -356,7 +438,6 @@ impl GitHubApp {
       owner_id,
       installation_id,
     };
-    self.repos.insert(key, info.clone());
     Ok(info)
   }
 

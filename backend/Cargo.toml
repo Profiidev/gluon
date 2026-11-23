@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 centaurus = { version = "0.17.9", features = [
   "backend",
-  "logging"
+  "logging",
+  "metrics"
 ], default-features = false }
 axum = { version = "0.8.9", features = ["macros", "tracing"] }
 tokio = { version = "1.54.1", features = [
@@ -17,6 +18,7 @@ tokio = { version = "1.54.1", features = [
 ] }
 tracing = "0.1.44"
 dotenvy = "0.15.7"
+figment = { version = "0.10.19", features = ["env"] }
 clap = { version = "4.6.9", features = ["derive", "env"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.154"
@@ -34,7 +36,6 @@ regex = "1.13.2"
 cel = "0.16.0"
 zeroize = "1.9.2"
 metrics = "0.24.6"
-metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 sha2 = "0.11.0"
 hex = "0.4.3"
 chrono = { version = "0.4.44", features = ["serde"] }

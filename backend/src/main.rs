@@ -1,11 +1,10 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use backend::{App, Config};
+use backend::{App, Config, Settings};
 use centaurus::logging::init_logging;
 use clap::Parser;
 #[cfg(debug_assertions)]
 use dotenvy::dotenv;
-use tracing::level_filters::LevelFilter;
 
 /// GitHub App token broker: exchanges CI OIDC tokens for scoped installation tokens.
 #[derive(Parser)]
@@ -22,10 +21,6 @@ struct Cli {
   /// Validate the configuration and exit.
   #[arg(long)]
   check: bool,
-
-  /// Log level (off, error, warn, info, debug, trace).
-  #[arg(long, env = "LOG_LEVEL", default_value = "info")]
-  log_level: LevelFilter,
 }
 
 #[tokio::main]
@@ -48,8 +43,9 @@ async fn main() -> ExitCode {
     };
   }
 
-  init_logging(cli.log_level);
-  match App::new(cli.config_path).await {
+  let settings = Settings::parse();
+  init_logging(settings.base.log_level);
+  match App::new(settings, cli.config_path).await {
     Ok(app) => {
       app.run().await;
       ExitCode::SUCCESS

@@ -12,9 +12,12 @@ pub struct Matcher {
   expr: Option<Arc<cel::Program>>,
 }
 
+const CASE_INSENSITIVE: &[&str] = &["owner", "repository"];
+
 struct Condition {
   field: String,
   negate: bool,
+  fold: bool,
   op: Op,
 }
 
@@ -74,13 +77,20 @@ impl Matcher {
       if ops.is_empty() {
         return Err(format!("{field}: empty condition"));
       }
+      // GitHub account and repository names are case-insensitive.
+      let fold = CASE_INSENSITIVE.contains(&field.as_str());
       for (name, v) in ops {
         let (negate, base) = match name.strip_prefix("not_") {
           Some(b) => (true, b),
           None => (false, name.as_str()),
         };
         let op = match base {
-          "eq" | "in" => Op::In(list(&v)?),
+          "eq" | "in" => Op::In(
+            list(&v)?
+              .into_iter()
+              .map(|x| if fold { x.to_lowercase() } else { x })
+              .collect(),
+          ),
           "glob" => {
             let pattern = v
               .as_str()
@@ -88,6 +98,7 @@ impl Matcher {
             // `*` does not cross `/`; use `**` for that.
             let glob = GlobBuilder::new(pattern)
               .literal_separator(true)
+              .case_insensitive(fold)
               .build()
               .map_err(|e| format!("{field}.{name}: {e}"))?;
             Op::Glob(glob.compile_matcher())
@@ -96,7 +107,8 @@ impl Matcher {
             let pattern = v
               .as_str()
               .ok_or(format!("{field}.{name} must be a string"))?;
-            let re = Regex::new(&format!("^(?:{pattern})$"))
+            let flags = if fold { "(?i)" } else { "" };
+            let re = Regex::new(&format!("{flags}^(?:{pattern})$"))
               .map_err(|e| format!("{field}.{name}: {e}"))?;
             Op::Regex(re)
           }
@@ -105,6 +117,7 @@ impl Matcher {
         conditions.push(Condition {
           field: field.clone(),
           negate,
+          fold,
           op,
         });
       }
@@ -112,9 +125,21 @@ impl Matcher {
     Ok(Matcher { conditions, expr })
   }
 
+  /// Allow rules fail closed on CEL errors.
   pub fn matches(&self, caller: &Caller) -> bool {
+    self.eval(caller, false)
+  }
+
+  /// Deny rules: a CEL error counts as a match, so a broken expression denies.
+  pub fn matches_deny(&self, caller: &Caller) -> bool {
+    self.eval(caller, true)
+  }
+
+  fn eval(&self, caller: &Caller, on_error: bool) -> bool {
     for c in &self.conditions {
-      let value = caller.get(&c.field);
+      let value = caller
+        .get(&c.field)
+        .map(|v| if c.fold { v.to_lowercase() } else { v });
       let hit = match (&c.op, value.as_deref()) {
         (_, None) => false,
         (Op::In(values), Some(v)) => values.iter().any(|x| x == v),
@@ -126,31 +151,31 @@ impl Matcher {
       }
     }
     match &self.expr {
-      Some(program) => eval_cel(program, caller),
+      Some(program) => eval_cel(program, caller).unwrap_or(on_error),
       None => true,
     }
   }
 }
 
-fn eval_cel(program: &cel::Program, caller: &Caller) -> bool {
+fn eval_cel(program: &cel::Program, caller: &Caller) -> Option<bool> {
   let mut ctx = cel::Context::default();
   let value = match cel::to_value(caller) {
     Ok(v) => v,
     Err(e) => {
       tracing::warn!("cel: cannot convert caller: {e}");
-      return false;
+      return None;
     }
   };
   ctx.add_variable_from_value("caller", value);
   match program.execute(&ctx) {
-    Ok(cel::Value::Bool(b)) => b,
+    Ok(cel::Value::Bool(b)) => Some(b),
     Ok(other) => {
       tracing::warn!("cel: expression returned non-bool {other:?}");
-      false
+      None
     }
     Err(e) => {
       tracing::debug!("cel: evaluation error {e}");
-      false
+      None
     }
   }
 }
@@ -198,5 +223,17 @@ mod test {
     // Non-bool and errors fail closed.
     assert!(!m("expr = \"caller.repository\"").matches(&c));
     assert!(!m("expr = \"caller.missing.field == 1\"").matches(&c));
+    // Deny rules fail closed instead.
+    assert!(m("expr = \"caller.missing.field == 1\"").matches_deny(&c));
+  }
+
+  #[test]
+  fn names_are_case_insensitive() {
+    let c = caller();
+    assert!(m("repository = 'profiidev/FOO'").matches(&c));
+    assert!(m("owner = { glob = 'PROFII*' }").matches(&c));
+    assert!(m("repository = { regex = 'profiidev/.*' }").matches(&c));
+    // Refs stay case-sensitive.
+    assert!(!m("ref = 'refs/heads/FEATURE/x'").matches(&c));
   }
 }

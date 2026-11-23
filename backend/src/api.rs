@@ -20,8 +20,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 
+use centaurus::backend::middleware::rate_limiter::RateLimiter;
+
 use crate::{
-  github::{GhError, GitHubApp},
+  github::{GhError, GitHubApp, valid_full_name},
   oidc::{self, Caller},
   policy::{self, EvalError, Permissions, RepoRef, Resolved, TokenRequest},
   state::AppState,
@@ -29,14 +31,20 @@ use crate::{
 
 type AppStateRef = Arc<AppState>;
 
-pub fn router(state: AppStateRef) -> Router {
+/// Upper bound for `repositories` + `repository_ids` in one request.
+const MAX_REQUESTED_TARGETS: usize = 20;
+
+/// Mounted under `/api` by centaurus, which also serves `/api/health`.
+pub fn router(state: AppStateRef, limiter: &mut RateLimiter) -> Router {
   Router::new()
     .route(
       "/v1/token",
       post(post_token).get(get_token).delete(delete_token),
     )
     .route("/v1/exchange", post(exchange))
-    .route("/healthz", get(|| async { "OK" }))
+    // Coarse per-IP limit in front of token validation; the per-repository
+    // limit applies after it.
+    .layer(limiter.create_limiter())
     .route("/readyz", get(readyz))
     .with_state(state)
 }
@@ -113,6 +121,7 @@ impl IntoResponse for ApiError {
       "access_denied" => "The request is not permitted.",
       "not_installed" => "The GitHub App cannot grant this.",
       "rate_limited" => "Too many requests.",
+      "unsupported_grant_type" => "The grant type is not supported.",
       _ => "The GitHub API request failed.",
     };
     (
@@ -220,10 +229,9 @@ fn client_ip(state: &AppState, peer: SocketAddr, headers: &HeaderMap) -> IpAddr 
     && let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
   {
     // Walk from the closest hop back until the first untrusted address.
-    for hop in xff
-      .rsplit(',')
-      .filter_map(|h| h.trim().parse::<IpAddr>().ok())
-    {
+    // An unparsable hop ends the walk: everything before it is client-supplied.
+    for hop in xff.rsplit(',').map(|h| h.trim().parse::<IpAddr>()) {
+      let Ok(hop) = hop else { break };
       ip = hop;
       if !trusted(&hop) {
         break;
@@ -323,11 +331,14 @@ async fn issue_inner(
     }
   }
 
-  for name in &req.repositories {
-    if !matches!(name.split_once('/'), Some((o, r)) if !o.is_empty() && !r.is_empty() && !r.contains('/'))
-    {
-      return Err(ApiError::invalid_request(format!("bad repository {name}")));
-    }
+  if req.repositories.len() + req.repository_ids.len() > MAX_REQUESTED_TARGETS {
+    return Err(ApiError::invalid_request("too many requested targets"));
+  }
+  if let Some(name) = req.repositories.iter().find(|n| !valid_full_name(n)) {
+    return Err(ApiError::invalid_request(format!(
+      "bad repository {:?}",
+      name.chars().take(100).collect::<String>()
+    )));
   }
 
   let rule = policy::select(&caller, req, &runtime.config.policy)?;
@@ -409,20 +420,50 @@ async fn resolve_targets(
   }
 
   let mut names: BTreeMap<String, u64> = BTreeMap::new();
-  let all_names = rule
+  let rule_names: Vec<&str> = rule
     .grant
     .target
     .repos
     .iter()
     .filter_map(|r| match r {
-      RepoRef::Name(n) => Some(n.clone()),
+      RepoRef::Name(n) => Some(n.as_str()),
       RepoRef::Id(_) => None,
     })
-    .chain(req.repositories.iter().cloned());
-  for name in all_names {
-    let info = app.resolve_repo(&name).await?;
+    .collect();
+  for name in rule_names {
+    let info = app.resolve_repo(name).await?;
     installations.insert(info.installation_id);
     names.insert(name.to_ascii_lowercase(), info.id);
+  }
+  // Requested names: only look up names that can be in the grant at all, and
+  // answer access_denied for unknown ones so callers learn nothing about them.
+  let caller_repo = caller.repository.as_deref().map(str::to_ascii_lowercase);
+  let needs_lookup = rule.grant.target.owner_wide
+    || rule
+      .grant
+      .target
+      .repos
+      .iter()
+      .any(|r| matches!(r, RepoRef::Id(_)));
+  for name in &req.repositories {
+    let lower = name.to_ascii_lowercase();
+    if names.contains_key(&lower) {
+      continue;
+    }
+    if rule.grant.target.include_self && caller_repo.as_deref() == Some(lower.as_str()) {
+      let (repo_id, _, _) = caller_github()?;
+      names.insert(lower, repo_id);
+      continue;
+    }
+    if !needs_lookup {
+      return Err(ApiError::denied("requested repository outside the grant"));
+    }
+    let info = app.resolve_repo(name).await.map_err(|e| match e {
+      GhError::NotInstalled(d) => ApiError::denied(format!("requested repository: {d}")),
+      e => e.into(),
+    })?;
+    installations.insert(info.installation_id);
+    names.insert(lower, info.id);
   }
   for r in &rule.grant.target.repos {
     rule_ids.push(match r {

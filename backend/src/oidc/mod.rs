@@ -10,9 +10,8 @@ use std::{
 };
 
 use jsonwebtoken::{DecodingKey, Validation, jwk::JwkSet};
-use moka::sync::Cache;
 use serde_json::{Map, Value};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::{instrument, warn};
 
 use crate::config::IssuerConfig;
@@ -21,19 +20,53 @@ pub mod caller;
 
 pub use caller::Caller;
 
-/// Minimum time between JWKS refetches triggered by unknown `kid`s.
-const FORCED_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// Minimum time between JWKS fetches made by requests (unknown `kid` or stale cache).
+const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(3600);
+const REPLAY_CAPACITY: usize = 500_000;
 
-/// Replay set shared by all issuers, kept across config reloads.
-pub type ReplayCache = Cache<String, ()>;
+/// Seen `jti`s, shared by all issuers and kept across config reloads. Entries are
+/// never evicted before the token they belong to has expired; when full, new
+/// tokens are refused instead.
+pub struct ReplayCache {
+  seen: Mutex<HashMap<String, u64>>,
+  capacity: usize,
+}
 
 pub fn replay_cache() -> ReplayCache {
-  // Entries live until the longest possible token age has passed.
-  Cache::builder()
-    .max_capacity(1_000_000)
-    .time_to_live(Duration::from_secs(3600))
-    .build()
+  ReplayCache::new(REPLAY_CAPACITY)
+}
+
+impl ReplayCache {
+  pub fn new(capacity: usize) -> ReplayCache {
+    ReplayCache {
+      seen: Mutex::new(HashMap::new()),
+      capacity,
+    }
+  }
+
+  /// Record `key` until `expires_at` (unix seconds); errors on replay or when full.
+  fn insert(&self, key: String, expires_at: u64) -> Result<(), String> {
+    let now = jsonwebtoken::get_current_timestamp();
+    let mut seen = self.seen.lock().unwrap();
+    if seen.get(&key).is_some_and(|e| *e >= now) {
+      metrics::counter!("broker_replay_rejected_total").increment(1);
+      return Err("replayed jti".into());
+    }
+    if seen.len() >= self.capacity {
+      seen.retain(|_, e| *e >= now);
+      if seen.len() >= self.capacity {
+        return Err("replay cache full".into());
+      }
+    }
+    seen.insert(key, expires_at);
+    Ok(())
+  }
+}
+
+/// Untrusted values in log messages: bounded and escaped.
+fn short(s: &str) -> String {
+  format!("{:?}", s.chars().take(64).collect::<String>())
 }
 
 struct JwksState {
@@ -45,7 +78,8 @@ pub struct Issuer {
   pub config: IssuerConfig,
   http: reqwest::Client,
   jwks: RwLock<Option<JwksState>>,
-  last_forced: Mutex<Option<Instant>>,
+  /// Single-flight guard for request-triggered fetches.
+  refresh_lock: AsyncMutex<Option<Instant>>,
   fetched: AtomicBool,
 }
 
@@ -55,7 +89,7 @@ impl Issuer {
       config,
       http,
       jwks: RwLock::new(None),
-      last_forced: Mutex::new(None),
+      refresh_lock: AsyncMutex::new(None),
       fetched: AtomicBool::new(false),
     }
   }
@@ -80,10 +114,24 @@ impl Issuer {
       .json()
       .await
       .map_err(|e| format!("discovery: {e}"))?;
-    doc["jwks_uri"]
-      .as_str()
-      .map(String::from)
-      .ok_or_else(|| "discovery: no jwks_uri".into())
+    let uri = doc["jwks_uri"].as_str().ok_or("discovery: no jwks_uri")?;
+    // The JWKS must live on the issuer's own origin (scheme, host and port).
+    let origin = |u: &str| {
+      reqwest::Url::parse(u).ok().map(|u| {
+        (
+          u.scheme().to_string(),
+          u.host_str().map(String::from),
+          u.port_or_known_default(),
+        )
+      })
+    };
+    if origin(uri).is_none() || origin(uri) != origin(&self.config.url) {
+      return Err(format!(
+        "discovery: jwks_uri {} is not on the issuer origin",
+        short(uri)
+      ));
+    }
+    Ok(uri.to_string())
   }
 
   #[instrument(skip(self), fields(issuer = %self.config.name))]
@@ -137,34 +185,34 @@ impl Issuer {
     Ok((keys, ttl))
   }
 
-  /// Look up a key; refetch once if unknown or stale (rate limited).
+  async fn cached(&self, kid: &str, fresh_only: bool) -> Option<DecodingKey> {
+    let jwks = self.jwks.read().await;
+    let state = jwks.as_ref()?;
+    if fresh_only && state.expires_at <= Instant::now() {
+      return None;
+    }
+    state.keys.get(kid).cloned()
+  }
+
+  /// Look up a key; on a miss or stale cache refetch at most once per
+  /// interval, with concurrent requests sharing one fetch. Stale keys are
+  /// used while the issuer is unreachable.
   async fn key(&self, kid: &str) -> Option<DecodingKey> {
-    {
-      let jwks = self.jwks.read().await;
-      if let Some(state) = jwks.as_ref()
-        && state.expires_at > Instant::now()
-        && let Some(k) = state.keys.get(kid)
-      {
-        return Some(k.clone());
+    if let Some(k) = self.cached(kid, true).await {
+      return Some(k);
+    }
+    let mut last = self.refresh_lock.lock().await;
+    if let Some(k) = self.cached(kid, true).await {
+      return Some(k);
+    }
+    if last.is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL) {
+      *last = Some(Instant::now());
+      if let Err(e) = self.refresh().await {
+        warn!("jwks refresh for {} failed: {e}", self.config.name);
       }
     }
-    let allowed = {
-      let mut last = self.last_forced.lock().unwrap();
-      let stale = self
-        .jwks
-        .try_read()
-        .map(|j| j.as_ref().is_none_or(|s| s.expires_at <= Instant::now()))
-        .unwrap_or(false);
-      let ok = stale || last.is_none_or(|t| t.elapsed() >= FORCED_REFRESH_INTERVAL);
-      if ok {
-        *last = Some(Instant::now());
-      }
-      ok
-    };
-    if allowed && let Err(e) = self.refresh().await {
-      warn!("jwks refresh for {} failed: {e}", self.config.name);
-    }
-    self.jwks.read().await.as_ref()?.keys.get(kid).cloned()
+    drop(last);
+    self.cached(kid, false).await
   }
 }
 
@@ -185,7 +233,7 @@ pub async fn validate(
   let issuer = issuers
     .iter()
     .find(|i| i.config.url == iss.trim_end_matches('/'))
-    .ok_or_else(|| format!("untrusted issuer {iss}"))?;
+    .ok_or_else(|| format!("untrusted issuer {}", short(iss)))?;
   let cfg = &issuer.config;
 
   if !cfg.algorithms.contains(&header.alg) {
@@ -195,7 +243,7 @@ pub async fn validate(
   let key = issuer
     .key(kid)
     .await
-    .ok_or_else(|| format!("unknown kid {kid}"))?;
+    .ok_or_else(|| format!("unknown kid {}", short(kid)))?;
 
   let mut validation = Validation::new(header.alg);
   validation.algorithms = vec![header.alg];
@@ -208,6 +256,10 @@ pub async fn validate(
   let claims = jsonwebtoken::decode::<Map<String, Value>>(token, &key, &validation)
     .map_err(|e| format!("verify: {e}"))?
     .claims;
+  // The audience must be exactly ours, not one entry of a list.
+  if claims.get("aud").and_then(Value::as_str) != Some(cfg.audience.as_str()) {
+    return Err("aud is not exactly the configured audience".into());
+  }
 
   let now = jsonwebtoken::get_current_timestamp();
   let iat = claims
@@ -221,7 +273,10 @@ pub async fn validate(
     return Err("token too old".into());
   }
   for claim in &cfg.required_claims {
-    if claims.get(claim).is_none_or(Value::is_null) {
+    if claims
+      .get(claim)
+      .is_none_or(|v| v.is_null() || v.as_str() == Some(""))
+    {
       return Err(format!("missing claim {claim}"));
     }
   }
@@ -230,11 +285,9 @@ pub async fn validate(
 
   if cfg.replay_protection {
     let jti = caller.jti.as_deref().ok_or("missing jti")?;
-    let entry = replay.entry(format!("{}|{jti}", cfg.url)).or_insert(());
-    if !entry.is_fresh() {
-      metrics::counter!("broker_replay_rejected_total").increment(1);
-      return Err(format!("replayed jti {jti}"));
-    }
+    // Keep the entry for as long as the token could still be accepted.
+    let expires_at = iat + cfg.max_token_age.as_secs() + cfg.clock_skew.as_secs();
+    replay.insert(format!("{}|{jti}", cfg.url), expires_at)?;
   }
   Ok(caller)
 }

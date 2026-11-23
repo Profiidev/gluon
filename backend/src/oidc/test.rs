@@ -228,6 +228,63 @@ async fn alg_none_and_hs256_are_rejected() {
 }
 
 #[tokio::test]
+async fn aud_must_be_exact() {
+  let env = env().await;
+  let mut c = claims(&env.server.uri());
+  c["aud"] = json!(["github-token-broker", "other"]);
+  assert!(check(&env, &sign(&c)).await.unwrap_err().contains("aud"));
+}
+
+#[test]
+fn replay_cache_never_drops_live_entries() {
+  let now = jsonwebtoken::get_current_timestamp();
+  let cache = ReplayCache::new(2);
+  cache.insert("a".into(), now + 60).unwrap();
+  cache.insert("b".into(), now + 60).unwrap();
+  // Full of live entries: refuse instead of evicting.
+  assert!(
+    cache
+      .insert("c".into(), now + 60)
+      .unwrap_err()
+      .contains("full")
+  );
+  assert!(
+    cache
+      .insert("a".into(), now + 60)
+      .unwrap_err()
+      .contains("replayed")
+  );
+  // Expired entries make room.
+  let cache = ReplayCache::new(1);
+  cache.insert("old".into(), now - 1).unwrap();
+  cache.insert("new".into(), now + 60).unwrap();
+}
+
+#[tokio::test]
+async fn jwks_uri_must_be_on_issuer_origin() {
+  let server = MockServer::start().await;
+  Mock::given(method("GET"))
+    .and(path("/.well-known/openid-configuration"))
+    .respond_with(
+      ResponseTemplate::new(200)
+        .set_body_json(json!({ "jwks_uri": "https://evil.example.com/jwks" })),
+    )
+    .mount(&server)
+    .await;
+  let env = env().await;
+  let mut cfg = env.issuer.config.clone();
+  cfg.url = server.uri();
+  let issuer = Issuer::new(cfg, reqwest::Client::new());
+  assert!(
+    issuer
+      .refresh()
+      .await
+      .unwrap_err()
+      .contains("issuer origin")
+  );
+}
+
+#[tokio::test]
 async fn replayed_jti_is_rejected() {
   let env = env().await;
   let token = sign(&claims(&env.server.uri()));

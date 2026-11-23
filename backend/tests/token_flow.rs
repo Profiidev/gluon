@@ -56,7 +56,7 @@ async fn empty_body_and_get_variant() {
   let s = TestServer::start().await;
   let res = s
     .client
-    .post(format!("{}/v1/token", s.url))
+    .post(format!("{}/api/v1/token", s.url))
     .bearer_auth(s.token("Profiidev/nix", 42, OWNER_ID))
     .send()
     .await
@@ -65,7 +65,7 @@ async fn empty_body_and_get_variant() {
 
   let res = s
     .client
-    .get(format!("{}/v1/token?permissions=contents:read", s.url))
+    .get(format!("{}/api/v1/token?permissions=contents:read", s.url))
     .bearer_auth(s.token("Profiidev/nix", 42, OWNER_ID))
     .send()
     .await
@@ -160,7 +160,7 @@ async fn token_errors() {
   let s = TestServer::start().await;
   let res = s
     .client
-    .post(format!("{}/v1/token", s.url))
+    .post(format!("{}/api/v1/token", s.url))
     .send()
     .await
     .unwrap();
@@ -224,7 +224,7 @@ async fn rfc8693_exchange() {
   let s = TestServer::start().await;
   let res = s
     .client
-    .post(format!("{}/v1/exchange", s.url))
+    .post(format!("{}/api/v1/exchange", s.url))
     .form(&[
       (
         "grant_type",
@@ -250,7 +250,7 @@ async fn rfc8693_exchange() {
 
   let res = s
     .client
-    .post(format!("{}/v1/exchange", s.url))
+    .post(format!("{}/api/v1/exchange", s.url))
     .json(&json!({
       "grant_type": "password",
       "subject_token": "x",
@@ -267,7 +267,7 @@ async fn revoke() {
   let s = TestServer::start().await;
   let res = s
     .client
-    .delete(format!("{}/v1/token", s.url))
+    .delete(format!("{}/api/v1/token", s.url))
     .bearer_auth(s.token("Profiidev/nix", 42, OWNER_ID))
     .json(&json!({ "token": "ghs_abc" }))
     .send()
@@ -289,7 +289,7 @@ async fn revoke() {
   // Without a subject token.
   let res = s
     .client
-    .delete(format!("{}/v1/token", s.url))
+    .delete(format!("{}/api/v1/token", s.url))
     .json(&json!({ "token": "ghs_abc" }))
     .send()
     .await
@@ -321,7 +321,7 @@ async fn rate_limit_per_repository() {
 #[tokio::test]
 async fn health_and_metrics() {
   let s = TestServer::start().await;
-  for p in ["/healthz", "/readyz"] {
+  for p in ["/api/health", "/api/readyz"] {
     assert_eq!(
       s.client
         .get(format!("{}{p}", s.url))
@@ -336,7 +336,7 @@ async fn health_and_metrics() {
     .await;
   let metrics = s
     .client
-    .get(format!("{}/metrics", s.metrics_url))
+    .get(format!("{}/api/metrics", s.url))
     .send()
     .await
     .unwrap()
@@ -351,14 +351,95 @@ async fn health_and_metrics() {
   ] {
     assert!(metrics.contains(name), "{name} missing:\n{metrics}");
   }
-  // Metrics are not on the public listener when a separate one is configured.
-  assert_eq!(
-    s.client
-      .get(format!("{}/metrics", s.url))
-      .send()
-      .await
-      .unwrap()
-      .status(),
-    404
+}
+
+#[tokio::test]
+async fn requested_names_are_checked_before_lookup() {
+  let s = TestServer::start().await;
+  let before = s.mock.received_requests().await.unwrap().len();
+  // Default grant is self only: a foreign name is refused without asking GitHub.
+  let (status, body) = s
+    .post_token(
+      &s.token("Profiidev/nix", 42, OWNER_ID),
+      json!({ "repositories": ["Profiidev/secret-thing"] }),
+    )
+    .await;
+  assert_eq!(status, 403, "{body}");
+  let calls = s.mock.received_requests().await.unwrap();
+  assert!(
+    !calls[before..]
+      .iter()
+      .any(|r| r.url.path().contains("secret-thing")),
+    "looked up an unrelated repository"
   );
+
+  // Asking for yourself by name needs no lookup either.
+  let (status, body) = s
+    .post_token(
+      &s.token("Profiidev/nix", 42, OWNER_ID),
+      json!({ "repositories": ["profiidev/NIX"] }),
+    )
+    .await;
+  assert_eq!(status, 200, "{body}");
+
+  // Unknown names inside a lookup-capable grant answer access_denied, not not_installed.
+  let (status, body) = s
+    .post_token(
+      &s.token("Profiidev/foo", 1, OWNER_ID),
+      json!({ "repositories": ["Profiidev/ghost"] }),
+    )
+    .await;
+  assert_eq!(status, 403, "{body}");
+}
+
+#[tokio::test]
+async fn request_limits_and_name_validation() {
+  let s = TestServer::start().await;
+  let many: Vec<u64> = (0..21).collect();
+  let (status, _) = s
+    .post_token(
+      &s.token("Profiidev/nix", 42, OWNER_ID),
+      json!({ "repository_ids": many }),
+    )
+    .await;
+  assert_eq!(status, 400);
+  for bad in ["Profiidev/..", "Profiidev/x?y", "../app/x", "a/b/c"] {
+    let (status, _) = s
+      .post_token(
+        &s.token("Profiidev/nix", 42, OWNER_ID),
+        json!({ "repositories": [bad] }),
+      )
+      .await;
+    assert_eq!(status, 400, "{bad}");
+  }
+}
+
+#[tokio::test]
+async fn secondary_rate_limit_backs_off() {
+  use wiremock::{
+    Mock, ResponseTemplate,
+    matchers::{method, path},
+  };
+  let s = TestServer::start().await;
+  Mock::given(method("GET"))
+    .and(path("/users/Limited/installation"))
+    .respond_with(
+      ResponseTemplate::new(403)
+        .set_body_json(json!({ "message": "You have exceeded a secondary rate limit" })),
+    )
+    .mount(&s.mock)
+    .await;
+  let (status, _) = s.post_token(&s.token("Limited/x", 8, 300), json!({})).await;
+  assert_eq!(status, 502);
+  let count = |reqs: &[wiremock::Request]| {
+    reqs
+      .iter()
+      .filter(|r| r.url.path() == "/users/Limited/installation")
+      .count()
+  };
+  let first = count(&s.mock.received_requests().await.unwrap());
+  // Backing off: the next call does not reach GitHub.
+  let (status, _) = s.post_token(&s.token("Limited/x", 8, 300), json!({})).await;
+  assert_eq!(status, 502);
+  assert_eq!(count(&s.mock.received_requests().await.unwrap()), first);
 }

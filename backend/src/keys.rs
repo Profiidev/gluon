@@ -48,22 +48,21 @@ impl AppKey {
 }
 
 fn read_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mode = meta.permissions().mode() & 0o777;
-    // 0400 is the goal; group read is tolerated because Kubernetes adds it with fsGroup.
-    if mode & 0o037 != 0 {
-      return Err(format!(
-        "{}: mode {mode:o} is too open (no group write or world access allowed)",
-        path.display()
-      ));
-    }
+  use std::{io::Read, os::unix::fs::PermissionsExt};
+  let err = |e: std::io::Error| format!("{}: {e}", path.display());
+  // Check the mode on the handle we read from, so the file cannot be swapped in between.
+  let mut file = std::fs::File::open(path).map_err(err)?;
+  let mode = file.metadata().map_err(err)?.permissions().mode() & 0o777;
+  // 0400 is the goal; group read is tolerated because Kubernetes adds it with fsGroup.
+  if mode & 0o037 != 0 {
+    return Err(format!(
+      "{}: mode {mode:o} is too open (no group write or world access allowed)",
+      path.display()
+    ));
   }
-  std::fs::read(path)
-    .map(Zeroizing::new)
-    .map_err(|e| format!("{}: {e}", path.display()))
+  let mut buf = Zeroizing::new(Vec::new());
+  file.read_to_end(&mut buf).map_err(err)?;
+  Ok(buf)
 }
 
 #[cfg(test)]

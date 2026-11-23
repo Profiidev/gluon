@@ -17,6 +17,19 @@ pub const DANGEROUS_PERMISSIONS: &[&str] = &[
   "secrets",
   "members",
   "organization_administration",
+  "environments",
+  "organization_secrets",
+  "repository_hooks",
+  "organization_hooks",
+  "organization_self_hosted_runners",
+  "organization_personal_access_tokens",
+  "organization_personal_access_token_requests",
+  "organization_custom_roles",
+  "organization_custom_org_roles",
+  "organization_user_blocking",
+  "dependabot_secrets",
+  "codespaces_secrets",
+  "organization_codespaces_secrets",
 ];
 
 /// Denied unless the rule lists them in `allow_events`.
@@ -165,7 +178,7 @@ pub fn select<'a>(
   if let Some(rule) = policy
     .rules
     .iter()
-    .find(|r| r.effect == Effect::Deny && r.matcher.matches(caller))
+    .find(|r| r.effect == Effect::Deny && r.matcher.matches_deny(caller))
   {
     return denied(format!("deny rule {} matched", rule.name));
   }

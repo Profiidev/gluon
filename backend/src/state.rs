@@ -5,7 +5,7 @@ use std::{
   collections::HashMap,
   num::NonZeroU32,
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{Arc, Mutex},
   time::SystemTime,
 };
 
@@ -44,7 +44,14 @@ impl Runtime {
         .map_err(|e| format!("app {}: {e}", app.name))?;
       apps.insert(
         app.name.clone(),
-        Arc::new(GitHubApp::new(app.clone(), keys, http.clone())),
+        Arc::new(GitHubApp::new(
+          app.clone(),
+          keys,
+          http.clone(),
+          previous
+            .and_then(|p| p.apps.get(&app.name))
+            .map(|a| a.as_ref()),
+        )),
       );
     }
     let issuers = config
@@ -81,12 +88,17 @@ pub struct AppState {
   pub replay: ReplayCache,
   pub http: reqwest::Client,
   pub config_path: PathBuf,
+  /// Key files of the last config that parsed, even if loading it failed, so a
+  /// key file that shows up later still triggers a reload.
+  watched: Mutex<Vec<PathBuf>>,
 }
 
 pub fn http_client() -> reqwest::Client {
   reqwest::Client::builder()
     .timeout(std::time::Duration::from_secs(15))
     .user_agent("gluon-token-broker")
+    // Never follow redirects: JWKS must come from the issuer, API calls from GitHub.
+    .redirect(reqwest::redirect::Policy::none())
     .build()
     .expect("http client")
 }
@@ -94,6 +106,7 @@ pub fn http_client() -> reqwest::Client {
 impl AppState {
   pub fn new(runtime: Runtime, config_path: PathBuf, http: reqwest::Client) -> AppState {
     AppState {
+      watched: Mutex::new(runtime.config.watched_files()),
       runtime: ArcSwap::from_pointee(runtime),
       replay: replay_cache(),
       http,
@@ -104,13 +117,8 @@ impl AppState {
   /// Re-read config and keys; on any error the running config stays active.
   pub fn reload(&self) -> Result<(), String> {
     let result = Config::load(&self.config_path).and_then(|config| {
-      let current = self.runtime.load();
-      if config.server.listen != current.config.server.listen
-        || config.server.metrics_listen != current.config.server.metrics_listen
-      {
-        warn!("listen address changes need a restart");
-      }
-      Runtime::build(config, Some(&current), &self.http)
+      *self.watched.lock().unwrap() = config.watched_files();
+      Runtime::build(config, Some(&self.runtime.load()), &self.http)
     });
     let label = if result.is_ok() { "ok" } else { "error" };
     metrics::counter!("broker_config_reload_total", "result" => label).increment(1);
@@ -138,7 +146,7 @@ impl AppState {
 
   fn fingerprint(&self) -> Vec<Option<SystemTime>> {
     let mut files = vec![self.config_path.clone()];
-    files.extend(self.runtime.load().config.watched_files());
+    files.extend(self.watched.lock().unwrap().iter().cloned());
     files.iter().map(|p| mtime(p)).collect()
   }
 }

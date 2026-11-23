@@ -4,7 +4,6 @@
 
 use std::{
   collections::{BTreeMap, HashMap, HashSet},
-  net::SocketAddr,
   path::{Path, PathBuf},
   time::Duration,
 };
@@ -31,8 +30,6 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-  pub listen: SocketAddr,
-  pub metrics_listen: Option<SocketAddr>,
   pub trusted_proxies: Vec<IpNet>,
   pub reload_interval: Duration,
 }
@@ -119,8 +116,6 @@ struct RawConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawServer {
-  listen: Option<SocketAddr>,
-  metrics_listen: Option<SocketAddr>,
   #[serde(default)]
   trusted_proxies: Vec<IpNet>,
   reload_interval: Option<String>,
@@ -303,11 +298,6 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
   }
 
   let server = ServerConfig {
-    listen: raw
-      .server
-      .listen
-      .unwrap_or_else(|| "0.0.0.0:8000".parse().unwrap()),
-    metrics_listen: raw.server.metrics_listen,
     trusted_proxies: raw.server.trusted_proxies,
     reload_interval: parse_duration(raw.server.reload_interval.as_deref().unwrap_or("10s"))?,
   };
@@ -374,7 +364,9 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
     return Err("at least one [[apps]] entry is required".into());
   }
 
-  let issuer_names: HashSet<&str> = issuers.iter().map(|i| i.name.as_str()).collect();
+  let issuer_kinds: HashMap<&str, IssuerKind> =
+    issuers.iter().map(|i| (i.name.as_str(), i.kind)).collect();
+  let is_github = |issuer: &str| issuer_kinds.get(issuer) == Some(&IssuerKind::Github);
   let app_names: HashSet<&str> = apps.iter().map(|a| a.name.as_str()).collect();
 
   let defaults = raw.defaults;
@@ -395,7 +387,7 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
     Ok(app)
   };
   let check_issuer = |issuer: &str, rule: &str| -> Result<(), String> {
-    if issuer_names.contains(issuer) {
+    if issuer_kinds.contains_key(issuer) {
       Ok(())
     } else {
       Err(format!("{rule}: unknown issuer {issuer}"))
@@ -412,9 +404,10 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
     }
   };
 
-  // Base conditions every implicit rule gets: issuer + owner restriction.
-  let owner_cond = |m: &mut BTreeMap<String, toml::Value>| {
-    if !defaults.owner_ids.is_empty() {
+  // Bind a rule to defaults.owner_ids. These are GitHub account IDs, so only
+  // GitHub issuers get them; an existing owner_id condition is kept.
+  let owner_cond = |m: &mut BTreeMap<String, toml::Value>, issuer: &str| {
+    if is_github(issuer) && !defaults.owner_ids.is_empty() && !m.contains_key("owner_id") {
       m.insert(
         "owner_id".into(),
         toml::Value::Array(
@@ -431,12 +424,15 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
   // Built-in default rule.
   if defaults.self_scope {
     check_issuer(&default_issuer, "defaults")?;
+    if !is_github(&default_issuer) {
+      return Err("defaults.self_scope needs a GitHub issuer".into());
+    }
     if defaults.owner_ids.is_empty() {
       return Err("defaults.self_scope requires defaults.owner_ids".into());
     }
     let mut m = BTreeMap::new();
     m.insert("issuer".into(), toml::Value::String(default_issuer.clone()));
-    owner_cond(&mut m);
+    owner_cond(&mut m, &default_issuer);
     add_name("default-self")?;
     rules.push(Rule {
       name: "default-self".into(),
@@ -475,11 +471,10 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
       "repository_id".into(),
       toml::Value::Integer(o.repository_id as i64),
     );
+    // Guards against ID typos and repositories transferred to another account.
+    owner_cond(&mut m, &issuer);
     let permissions = match o.mode {
       OverrideMode::Merge => {
-        if !m.contains_key("owner_id") {
-          owner_cond(&mut m);
-        }
         let mut p = defaults.permissions.clone();
         p.extend(o.permissions.clone());
         p
@@ -535,13 +530,13 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
         }
       };
       check_issuer(&issuer, &name)?;
-      if !m.contains_key("owner_id") && !m.contains_key("repository_id") {
-        if defaults.owner_ids.is_empty() {
+      if !binds(&m, "owner_id") && !binds(&m, "repository_id") {
+        if !is_github(&issuer) || defaults.owner_ids.is_empty() || m.contains_key("owner_id") {
           return Err(format!(
-            "{name}: allow rules must restrict owner_id or repository_id"
+            "{name}: allow rules must restrict owner_id or repository_id with eq/in"
           ));
         }
-        owner_cond(&mut m);
+        owner_cond(&mut m, &issuer);
       }
     }
     let target = match (r.target.as_deref(), r.repositories.is_empty()) {
@@ -712,7 +707,7 @@ fn compile_issuer(i: RawIssuer) -> Result<IssuerConfig, String> {
     IssuerKind::Generic => vec!["sub".into()],
   });
   let max_token_age = parse_duration(i.max_token_age.as_deref().unwrap_or("5m")).map_err(ctx)?;
-  // The replay cache keeps entries for one hour.
+  // Bounds how long replay entries (and their memory) are kept.
   if max_token_age > Duration::from_secs(3600) {
     return Err(ctx("max_token_age must be at most 1h".into()));
   }
@@ -729,6 +724,15 @@ fn compile_issuer(i: RawIssuer) -> Result<IssuerConfig, String> {
     claims: i.claims,
     required_claims,
   })
+}
+
+/// A positive `eq`/`in` condition on `key`; negated or pattern conditions do not bind.
+fn binds(m: &BTreeMap<String, toml::Value>, key: &str) -> bool {
+  match m.get(key) {
+    None => false,
+    Some(toml::Value::Table(t)) => !t.is_empty() && t.keys().all(|k| k == "eq" || k == "in"),
+    Some(_) => true,
+  }
 }
 
 fn unique<'a>(items: impl Iterator<Item = &'a str>, what: &str) -> Result<(), String> {
@@ -882,6 +886,14 @@ permissions = { contents = "read" }
         "override implied key",
         "[[overrides]]\nrepository_id=1\nmatch={repository_id={eq=2}}",
       ),
+      (
+        "glob owner binding",
+        "[[profiles]]\nname='p'\nrepositories=[5]\npermissions={contents='read'}\nmatch={owner_id={glob='*'}}",
+      ),
+      (
+        "environments is dangerous",
+        "[[profiles]]\nname='p'\npermissions={environments='write'}",
+      ),
     ];
     for (what, extra) in cases {
       let text = format!("{BASE}\n{extra}");
@@ -890,5 +902,36 @@ permissions = { contents = "read" }
     assert!(Config::parse(BASE).is_ok());
     // No apps at all.
     assert!(Config::parse("").is_err());
+    // A negated repository condition does not count as an account binding:
+    // the rule gets bound to defaults.owner_ids instead.
+    let negated = format!(
+      "{BASE}\n[[profiles]]\nname='p'\nrepositories=[5]\npermissions={{contents='read'}}\nmatch={{repository_id={{not_in=[5]}}}}"
+    );
+    let cfg = Config::parse(&negated).unwrap();
+    let rule = &cfg.policy.profiles["p"];
+    let foreign = crate::oidc::Caller::test("evil/repo", 9, 999);
+    assert!(!rule.matcher.matches(&foreign));
+    assert!(
+      rule
+        .matcher
+        .matches(&crate::oidc::Caller::test("me/repo", 9, 1))
+    );
+
+    // Non-GitHub issuers are never bound to the GitHub owner_ids implicitly.
+    let forgejo = format!(
+      "{BASE}\n[[issuers]]\nname='github'\nurl='https://token.actions.githubusercontent.com'\naudience='a'\n[[issuers]]\nname='fj'\nurl='https://git.example.com'\nkind='forgejo'\naudience='a'\n[[profiles]]\nname='p'\nrepositories=['o/r']\npermissions={{contents='read'}}\nmatch={{issuer='fj'}}"
+    );
+    assert!(
+      Config::parse(&forgejo)
+        .unwrap_err()
+        .contains("must restrict")
+    );
+    assert!(
+      Config::parse(&forgejo.replace(
+        "match={issuer='fj'}",
+        "match={issuer='fj', repository_id=7}"
+      ))
+      .is_ok()
+    );
   }
 }
