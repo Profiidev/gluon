@@ -638,6 +638,42 @@ mod ci_profiles {
   }
 
   #[test]
+  fn pr_automation() {
+    for wf in [
+      "auto-merge-release.yml",
+      "auto-merge-helm-chart-bump.yml",
+      "create-release.yml",
+      "fix-package-json.yml",
+    ] {
+      let d = run(
+        &ci(wf, "refs/pull/4/merge", "pull_request"),
+        "pr-automation",
+      )
+      .unwrap();
+      assert_eq!(d.permissions["contents"], Level::Write, "{wf}");
+      assert_eq!(d.permissions["pull_requests"], Level::Write, "{wf}");
+    }
+    assert!(
+      run(
+        &ci("checks.yml", "refs/pull/4/merge", "pull_request"),
+        "pr-automation"
+      )
+      .is_err()
+    );
+    assert!(
+      run(
+        &ci(
+          "create-release.yml",
+          "refs/pull/4/merge",
+          "pull_request_target"
+        ),
+        "pr-automation"
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
   fn renovate() {
     let d = run(
       &ci("renovate.yml", "refs/heads/main", "schedule"),
