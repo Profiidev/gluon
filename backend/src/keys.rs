@@ -1,4 +1,4 @@
-//! GitHub App private keys (§7). Key material is zeroized after parsing and
+//! GitHub App private keys. Key material is zeroized after parsing and
 //! never appears in `Debug` output or errors.
 
 use std::{fmt, path::Path};

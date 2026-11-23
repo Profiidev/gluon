@@ -1,4 +1,4 @@
-//! Internal caller model (§5.1) and issuer-specific claim mapping (V9).
+//! Internal caller model and issuer-specific claim mapping (V9).
 
 use serde::Serialize;
 use serde_json::{Map, Value};

@@ -1,4 +1,4 @@
-//! HTTP API (§8) and audit logging (§10).
+//! HTTP API and audit logging.
 
 use std::{
   collections::{BTreeMap, BTreeSet},
@@ -50,7 +50,7 @@ async fn readyz(State(state): State<AppStateRef>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// Errors (§8.4): generic bodies, details only in logs.
+// Errors: generic bodies, details only in logs.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -369,7 +369,7 @@ async fn issue_inner(
   })
 }
 
-/// Turn rule and requested targets into IDs and find the single installation (§5.6 step 7).
+/// Turn rule and requested targets into IDs and find the single installation they all belong to.
 async fn resolve_targets(
   app: &GitHubApp,
   caller: &Caller,
@@ -544,7 +544,7 @@ struct RevokeRequest {
   token: String,
 }
 
-/// §8.3: the caller must still present a valid subject token.
+/// Revoke a GitHub token; the caller must still present a valid subject token.
 async fn delete_token(
   State(state): State<AppStateRef>,
   ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -586,7 +586,7 @@ async fn delete_token(
 }
 
 // ---------------------------------------------------------------------------
-// RFC 8693 (§8.2)
+// RFC 8693 token exchange
 // ---------------------------------------------------------------------------
 
 const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";

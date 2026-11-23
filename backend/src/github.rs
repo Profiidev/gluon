@@ -1,4 +1,4 @@
-//! GitHub App API client (§6).
+//! GitHub App API client.
 
 use std::{
   sync::{
@@ -433,7 +433,7 @@ impl GitHubApp {
       .await
   }
 
-  /// §8.3: `DELETE /installation/token`.
+  /// Revoke an installation token via `DELETE /installation/token`.
   pub async fn revoke(&self, token: &str) -> GhResult<()> {
     let (status, body) = self
       .call(

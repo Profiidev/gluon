@@ -1,4 +1,4 @@
-//! Subject token validation (§4).
+//! Subject token validation.
 
 use std::{
   collections::HashMap,

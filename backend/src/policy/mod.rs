@@ -1,4 +1,4 @@
-//! Policy evaluation (§5.6). Pure functions of caller, request, config and
+//! Policy evaluation. Pure functions of caller, request, config and
 //! installation permissions; network lookups happen between [`select`] and
 //! [`finalize`] in the API layer.
 
@@ -148,7 +148,7 @@ fn allow_matches(rule: &Rule, caller: &Caller) -> bool {
   rule.matcher.matches(caller)
 }
 
-/// §5.6 steps 1-3: pick the rule.
+/// Pick the rule: deny rules first, then the profile or the best allow rule.
 pub fn select<'a>(
   caller: &Caller,
   req: &TokenRequest,
@@ -224,7 +224,7 @@ fn is_non_branch_ref(caller: &Caller) -> bool {
   !ref_ok || pr_ref
 }
 
-/// §5.6 steps 4-6.
+/// Compute targets and permissions for the chosen rule.
 pub fn finalize(
   caller: &Caller,
   req: &TokenRequest,

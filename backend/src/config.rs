@@ -428,7 +428,7 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
     }
   };
 
-  // Built-in default rule (§5.3).
+  // Built-in default rule.
   if defaults.self_scope {
     check_issuer(&default_issuer, "defaults")?;
     if defaults.owner_ids.is_empty() {
@@ -454,7 +454,7 @@ fn compile(raw: RawConfig) -> Result<Config, String> {
     });
   }
 
-  // Overrides (§5.4).
+  // Per-repository overrides.
   let mut replace_repos = HashSet::new();
   for o in raw.overrides {
     let name = o
