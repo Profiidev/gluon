@@ -57,7 +57,7 @@ The deployed config has five profiles. They let workflows stop using `COMMIT_BOT
 
 | Profile         | Workflow                                                                                   | Grant                                                                           |
 | --------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| `lint`          | `checks.yml` / `linting.yml` on same-repo PRs                                              | `contents`, `checks`, `pull_requests`: write                                    |
+| `lint`          | `checks.yml` on same-repo PRs                                                              | `contents`, `checks`, `pull_requests`: write                                    |
 | `publish`       | `checks-publish.yml` and `tests-publish.yml` on `workflow_run`, main only                  | `checks`, `pull_requests`: write; `contents`: read                              |
 | `chart-bump`    | `release.yml` on `v*` tags                                                                 | `contents: write` on `Profiidev/helm-charts` only                               |
 | `renovate`      | `renovate.yml` on main or its own PR runs                                                  | `contents`, `pull_requests`, `issues`, `checks`, `statuses`, `workflows`: write |

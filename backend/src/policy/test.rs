@@ -581,11 +581,6 @@ mod ci_profiles {
     assert_eq!(d.repository_ids, vec![7]);
     assert_eq!(d.permissions["contents"], Level::Write);
     assert_eq!(d.permissions["checks"], Level::Write);
-    run(
-      &ci("linting.yml", "refs/pull/3/merge", "pull_request"),
-      "lint",
-    )
-    .unwrap();
     assert!(
       run(
         &ci("other.yml", "refs/pull/3/merge", "pull_request"),
