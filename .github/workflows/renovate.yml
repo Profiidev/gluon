@@ -49,7 +49,7 @@ jobs:
           sudo chown -R 12021:0 /tmp/renovate/
           ls -R $cache_dir
 
-      - uses: profiidev/gluon@v1
+      - uses: profiidev/gluon@d715c4a8bd804db764307ad041e73c1c60ec7382 # v0
         id: app-token
         with:
           url: https://gluon.profidev.io
