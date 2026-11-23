@@ -6,3 +6,4 @@ backend/Cargo.lock
 coverage/
 test-results-*.xml
 *.js.map
+*.cjs.map

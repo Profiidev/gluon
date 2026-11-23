@@ -57,7 +57,9 @@ match = { ref_type = { eq = "tag" } }
 name = "no-self-hosted-write"
 effect = "deny"
 priority = 100
-match = { runner_environment = { eq = "self-hosted" }, repository_id = { in = [333333] } }
+match = { runner_environment = { eq = "self-hosted" }, repository_id = { in = [
+  333333
+] } }
 
 [limits]
 per_repository = "30/min"

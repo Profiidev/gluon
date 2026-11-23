@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-centaurus = { version = "0.17.9", features = ["backend", "logging"], default-features = false }
+centaurus = { version = "0.17.9", features = [
+  "backend",
+  "logging"
+], default-features = false }
 axum = { version = "0.8.9", features = ["macros", "tracing"] }
-tokio = { version = "1.54.1", features = ["signal", "rt-multi-thread", "macros", "fs"] }
+tokio = { version = "1.54.1", features = [
+  "signal",
+  "rt-multi-thread",
+  "macros",
+  "fs"
+] }
 tracing = "0.1.44"
 dotenvy = "0.15.7"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -14,7 +22,10 @@ serde_json = "1.0.154"
 figment = { version = "0.10.19", features = ["env"] }
 toml = "1.2.2"
 jsonwebtoken = { version = "12.0.0", features = ["rust_crypto"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "json",
+  "rustls"
+] }
 arc-swap = "1.9.5"
 moka = { version = "0.12.16", features = ["sync"] }
 governor = "0.10.4"
@@ -41,4 +52,8 @@ path = "src/main.rs"
 [dev-dependencies]
 wiremock = "=0.6.5"
 tempfile = "=3.27.0"
-reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "form"] }
+reqwest = { version = "=0.13.5", default-features = false, features = [
+  "json",
+  "rustls",
+  "form"
+] }
