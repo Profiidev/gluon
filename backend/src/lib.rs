@@ -11,7 +11,6 @@ use tracing::info;
 
 pub use crate::{
   config::Config,
-  settings::Settings,
   state::{AppState, Runtime},
 };
 
@@ -21,7 +20,6 @@ pub mod github;
 pub mod keys;
 pub mod oidc;
 pub mod policy;
-mod settings;
 pub mod state;
 
 pub struct App {

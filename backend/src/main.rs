@@ -1,58 +1,55 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use backend::{App, Config, Settings};
+use backend::{App, Config};
 use centaurus::logging::init_logging;
+use clap::Parser;
 #[cfg(debug_assertions)]
 use dotenvy::dotenv;
+use tracing::level_filters::LevelFilter;
 
-const USAGE: &str = "usage: gluon [--config <path>] [--check]";
+/// GitHub App token broker: exchanges CI OIDC tokens for scoped installation tokens.
+#[derive(Parser)]
+#[command(name = "gluon", version)]
+struct Cli {
+  /// Path to the TOML configuration.
+  #[arg(
+    long = "config",
+    env = "CONFIG_PATH",
+    default_value = "/etc/gluon/config.toml"
+  )]
+  config_path: PathBuf,
+
+  /// Validate the configuration and exit.
+  #[arg(long)]
+  check: bool,
+
+  /// Log level (off, error, warn, info, debug, trace).
+  #[arg(long, env = "LOG_LEVEL", default_value = "info")]
+  log_level: LevelFilter,
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
   #[cfg(debug_assertions)]
   dotenv().ok();
 
-  let settings = Settings::parse();
-  let mut config_path = settings.config_path;
-  let mut check = false;
-  let mut args = std::env::args().skip(1);
-  while let Some(arg) = args.next() {
-    match arg.as_str() {
-      "--check" => check = true,
-      "--config" => match args.next() {
-        Some(p) => config_path = PathBuf::from(p),
-        None => {
-          eprintln!("{USAGE}");
-          return ExitCode::from(2);
-        }
-      },
-      _ => {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-      }
-    }
-  }
+  let cli = Cli::parse();
 
-  if check {
-    return match Config::load(&config_path) {
+  if cli.check {
+    return match Config::load(&cli.config_path) {
       Ok(_) => {
-        println!("{}: OK", config_path.display());
+        println!("{}: OK", cli.config_path.display());
         ExitCode::SUCCESS
       }
       Err(e) => {
-        eprintln!("{}: {e}", config_path.display());
+        eprintln!("{}: {e}", cli.config_path.display());
         ExitCode::FAILURE
       }
     };
   }
 
-  init_logging(
-    settings
-      .log_level
-      .parse()
-      .unwrap_or(tracing::level_filters::LevelFilter::INFO),
-  );
-  match App::new(config_path).await {
+  init_logging(cli.log_level);
+  match App::new(cli.config_path).await {
     Ok(app) => {
       app.run().await;
       ExitCode::SUCCESS
