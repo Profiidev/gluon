@@ -321,7 +321,7 @@ async fn rate_limit_per_repository() {
 #[tokio::test]
 async fn health_and_metrics() {
   let s = TestServer::start().await;
-  for p in ["/api/health", "/api/readyz"] {
+  for p in ["/api/health", "/api/ready"] {
     assert_eq!(
       s.client
         .get(format!("{}{p}", s.url))

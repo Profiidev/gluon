@@ -13,7 +13,7 @@ use axum::{
   extract::{ConnectInfo, Query, State},
   http::{HeaderMap, StatusCode, header},
   response::{IntoResponse, Response},
-  routing::{get, post},
+  routing::post,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,7 +34,7 @@ type AppStateRef = Arc<AppState>;
 /// Upper bound for `repositories` + `repository_ids` in one request.
 const MAX_REQUESTED_TARGETS: usize = 20;
 
-/// Mounted under `/api` by centaurus, which also serves `/api/health`.
+/// Mounted under `/api` by centaurus, which also serves `/api/health` and `/api/ready`.
 pub fn router(state: AppStateRef, limiter: &mut RateLimiter) -> Router {
   Router::new()
     .route(
@@ -45,16 +45,7 @@ pub fn router(state: AppStateRef, limiter: &mut RateLimiter) -> Router {
     // Coarse per-IP limit in front of token validation; the per-repository
     // limit applies after it.
     .layer(limiter.create_limiter())
-    .route("/readyz", get(readyz))
     .with_state(state)
-}
-
-async fn readyz(State(state): State<AppStateRef>) -> Response {
-  if state.runtime.load().ready() {
-    (StatusCode::OK, "OK").into_response()
-  } else {
-    (StatusCode::SERVICE_UNAVAILABLE, "JWKS not fetched yet").into_response()
-  }
 }
 
 // ---------------------------------------------------------------------------

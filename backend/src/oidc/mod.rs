@@ -105,7 +105,7 @@ impl Issuer {
     }
   }
 
-  /// `/readyz`: JWKS fetched at least once.
+  /// `/ready`: JWKS fetched at least once.
   pub fn ready(&self) -> bool {
     self.fetched.load(Ordering::Relaxed)
   }

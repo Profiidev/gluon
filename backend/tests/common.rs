@@ -186,7 +186,7 @@ impl TestServer {
 
     let client = reqwest::Client::new();
     for _ in 0..100 {
-      if let Ok(r) = client.get(format!("{url}/api/readyz")).send().await
+      if let Ok(r) = client.get(format!("{url}/api/ready")).send().await
         && r.status() == 200
       {
         break;
