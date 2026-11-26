@@ -1,8 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
-use axum::Router;
+use axum::{Extension, Router};
 use centaurus::{
   backend::{
+    endpoints::health::ReadyCheck,
     init::{listener_setup, run_app_connect_info},
     router::build_router,
   },
@@ -41,10 +42,20 @@ impl App {
 
     let listener = listener_setup(settings.base.port).await;
     let api_state = state.clone();
-    // Routes end up under /api; centaurus adds /api/health, metrics, CORS and logging.
+    let ready_state = state.clone();
+    // Routes end up under /api; centaurus adds /api/health, /api/ready, metrics, CORS and logging.
     let mut app = build_router(
       |limiter| api::router(api_state, limiter),
-      |router, _| async { router },
+      |router, _| async move {
+        router.layer(Extension(ReadyCheck::new(move || {
+          ready_state
+            .runtime
+            .load()
+            .ready()
+            .then_some(())
+            .ok_or("JWKS not fetched yet")
+        })))
+      },
       settings,
     )
     .await;
